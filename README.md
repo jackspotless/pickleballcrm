@@ -28,11 +28,12 @@ npm install
 npm run db:start
 npm run db:reset            # applies supabase/migrations/*
 
-# Wire env: copy keys printed by `supabase start`
-cp .env.local.example .env.local   # then paste URL + anon + service-role keys
+# Wire env: anon key for the app; DATABASE_URL is the local CLI default
+cp .env.local.example .env.local   # paste the anon key printed by `supabase start`
 
-# Seed data (service-role key, bypasses RLS)
+# Seed + verify data (direct Postgres connection, bypasses RLS)
 npm run seed
+npm run verify
 
 # Run the app / tests
 npm run dev

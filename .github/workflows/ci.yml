@@ -35,15 +35,11 @@ jobs:
       - name: Reset DB (re-apply migrations cleanly)
         run: supabase db reset
 
-      - name: Export Supabase env
+      - name: Export DB connection
         run: |
           status=$(supabase status --output env)
-          api_url=$(echo "$status" | grep '^API_URL=' | cut -d= -f2- | tr -d '"')
-          anon=$(echo "$status" | grep '^ANON_KEY=' | cut -d= -f2- | tr -d '"')
-          svc=$(echo "$status" | grep '^SERVICE_ROLE_KEY=' | cut -d= -f2- | tr -d '"')
-          echo "NEXT_PUBLIC_SUPABASE_URL=$api_url" >> "$GITHUB_ENV"
-          echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$anon" >> "$GITHUB_ENV"
-          echo "SUPABASE_SERVICE_ROLE_KEY=$svc" >> "$GITHUB_ENV"
+          db_url=$(echo "$status" | grep '^DB_URL=' | cut -d= -f2- | tr -d '"')
+          echo "DATABASE_URL=$db_url" >> "$GITHUB_ENV"
 
       - name: Seed
         run: npm run seed
