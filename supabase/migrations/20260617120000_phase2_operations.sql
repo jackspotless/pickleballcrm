@@ -123,11 +123,13 @@ create or replace function is_team_captain(p_team uuid) returns boolean
   );
 $$;
 
--- Home captain only (ATPL convention) OR league commissioner.
+-- Either team's captain (each enters their own scores) OR league commissioner.
+-- (The opposing captain can also flag via flag_match(), regardless.)
 create or replace function can_write_match(p_match uuid) returns boolean
   language sql stable security definer set search_path = public, pg_temp as $$
   select is_commissioner(match_league_id(p_match))
-      or is_team_captain((select home_team_id from match where id = p_match));
+      or is_team_captain((select home_team_id from match where id = p_match))
+      or is_team_captain((select away_team_id from match where id = p_match));
 $$;
 
 revoke all on function
