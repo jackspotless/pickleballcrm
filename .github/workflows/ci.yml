@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests (scoring engine)
+        run: npm test
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start Supabase (applies migrations)
+        run: supabase start
+
+      - name: Reset DB (re-apply migrations cleanly)
+        run: supabase db reset
+
+      - name: Export Supabase env
+        run: |
+          status=$(supabase status --output env)
+          api_url=$(echo "$status" | grep '^API_URL=' | cut -d= -f2- | tr -d '"')
+          anon=$(echo "$status" | grep '^ANON_KEY=' | cut -d= -f2- | tr -d '"')
+          svc=$(echo "$status" | grep '^SERVICE_ROLE_KEY=' | cut -d= -f2- | tr -d '"')
+          echo "NEXT_PUBLIC_SUPABASE_URL=$api_url" >> "$GITHUB_ENV"
+          echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$anon" >> "$GITHUB_ENV"
+          echo "SUPABASE_SERVICE_ROLE_KEY=$svc" >> "$GITHUB_ENV"
+
+      - name: Seed
+        run: npm run seed
+
+      - name: Verify 21/24 anchor end-to-end
+        run: npm run verify
+
+      - name: Stop Supabase
+        if: always()
+        run: supabase stop

@@ -58,3 +58,12 @@ scoreMatch(games: Game[], config: ScoringConfig)
 
 Deterministic and side-effect free so the seed, API, and UI can all reuse it.
 Run `npm test` to exercise it.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push/PR: typecheck → unit tests →
+spin up local Supabase → apply migrations → seed → `npm run verify`. The verify
+step reads the seeded 04/07/2026 match back out of Postgres and scores it with
+the *stored* config via the engine, asserting **away 21 / home 24, winner
+Benchies United** — so the anchor can't silently drift across schema, seed, or
+engine changes.
