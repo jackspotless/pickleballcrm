@@ -17,8 +17,9 @@ No UI features, registration, or payments yet.
 
 ## Local development
 
-Prereqs: Node 20+, the [Supabase CLI](https://supabase.com/docs/guides/cli),
-and Docker (for local Supabase).
+Prereqs: Node 22+ (native WebSocket, required by `@supabase/supabase-js`), the
+[Supabase CLI](https://supabase.com/docs/guides/cli), and Docker (for local
+Supabase).
 
 ```bash
 npm install
