@@ -11,44 +11,56 @@ export interface Game {
 export type Side = "home" | "away";
 export type MatchOutcome = Side | "tie";
 
+/** Tiebreakers applied, in order, when match points are equal. */
+export type MatchTiebreaker =
+  | "games_won"
+  | "lines_won"
+  | "consolation"
+  | "point_differential";
+
 /**
- * How a line's winner is decided from its games.
- * - "games_won": side that won more games on the line.
- * - "point_differential": side with the higher total points across the line.
+ * Consolation rule: the losing side of a game earns `points` if it reached at
+ * least `min_loser_score`. (ATPL: 1 pt when a game's loser reaches 6.)
  */
-export type LineWinBy = "games_won" | "point_differential";
-
-/** Tiebreakers applied, in order, when match totals are equal. */
-export type MatchTiebreaker = "lines_won" | "games_won" | "point_differential";
+export interface ConsolationRule {
+  enabled: boolean;
+  min_loser_score: number;
+  points: number;
+}
 
 /**
- * The `scoring_format.config` JSON, typed. Drives how raw game scores roll up
- * into match totals and a winner. These knobs are league-configurable; the
- * ATPL values are pinned in atpl-config.ts.
+ * Whether a deciding (tiebreak) game is played when a line is level on games.
+ * ATPL: disabled — a split line simply has no winner.
+ */
+export interface TiebreakGameRule {
+  enabled: boolean;
+}
+
+/**
+ * The `scoring_format.config` JSON, typed. Keys mirror the data-model doc so the
+ * stored jsonb matches it verbatim. ATPL values are pinned in atpl-config.ts.
  */
 export interface ScoringConfig {
-  /** Points awarded per individual game won. */
-  pointsPerGameWin: number;
-  /** Points awarded to the side that wins a line. */
-  pointsPerLineWin: number;
-  /** Points awarded per raw point scored in games (often 0). */
-  pointsPerGamePoint?: number;
-  /** How each line's winner is determined. */
-  lineWinBy: LineWinBy;
-  /** When `lineWinBy: "games_won"` ends level, break the line by this. */
-  lineTiebreak?: "last_game" | "point_differential" | "none";
+  /** Points awarded to the winner of each game. */
+  points_per_game_win: number;
+  /** Per-game consolation for the loser. */
+  consolation: ConsolationRule;
+  /** Deciding-game behavior for split lines. */
+  tiebreak_game: TiebreakGameRule;
   /** Order of tiebreakers for the overall match winner. */
-  matchTiebreakers?: MatchTiebreaker[];
+  match_tiebreakers?: MatchTiebreaker[];
 }
 
 /** Per-side rollup used both for match totals and standings deltas. */
 export interface SideTotals {
   /** Final match points (the headline number, e.g. away 21 / home 24). */
   points: number;
-  linesWon: number;
-  linesLost: number;
   gamesWon: number;
   gamesLost: number;
+  linesWon: number;
+  linesLost: number;
+  /** Consolation points earned across all games. */
+  consolationPoints: number;
   /** Total raw points scored across all games. */
   pointsScored: number;
   /** pointsScored − opponent's pointsScored. */

@@ -59,7 +59,10 @@ const LINES: LineSeed[] = [
   { line: 9, away: ["Saenz", "Devane"], home: ["Michaud", "Rahman"], games: [[11, 13], [8, 11]] },
 ];
 
-/** ATPL line winner: more games won; a 1-1 split is decided by the last game. */
+/**
+ * ATPL line winner: the side that won more games. With tiebreak_game disabled,
+ * a level (e.g. 1-1) line has no winner.
+ */
 function lineWinner(games: [number, number][]): "home" | "away" | "unset" {
   let away = 0;
   let home = 0;
@@ -69,9 +72,6 @@ function lineWinner(games: [number, number][]): "home" | "away" | "unset" {
   }
   if (away > home) return "away";
   if (home > away) return "home";
-  const [la, lh] = games[games.length - 1];
-  if (la > lh) return "away";
-  if (lh > la) return "home";
   return "unset";
 }
 

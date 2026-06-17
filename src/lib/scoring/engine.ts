@@ -12,83 +12,82 @@ import type {
 /**
  * Pure scoring engine: (games, config) => match totals, winner, standings deltas.
  *
- * Deterministic and side-effect free so it can be unit tested and reused by the
- * seed, API, and (later) the UI without change.
+ * ATPL scoring is per-game: the game winner earns `points_per_game_win`, and the
+ * loser earns a consolation point when it reaches `consolation.min_loser_score`.
+ * Lines don't award points directly — a line winner is tracked only for display
+ * and standings tiebreakers, and a split line has no winner unless a deciding
+ * game is enabled.
+ *
+ * Deterministic and side-effect free so the seed, API, and UI can reuse it.
  */
 export function scoreMatch(
   games: Game[],
   config: ScoringConfig,
 ): ScoringResult {
   const lines = groupByLine(games);
+  const cons = config.consolation;
 
-  let homeLinesWon = 0;
-  let awayLinesWon = 0;
   let homeGamesWon = 0;
   let awayGamesWon = 0;
+  let homeLinesWon = 0;
+  let awayLinesWon = 0;
+  let homeConsolation = 0;
+  let awayConsolation = 0;
   let homePointsScored = 0;
   let awayPointsScored = 0;
 
   for (const lineGames of lines.values()) {
     let lineHomeGames = 0;
     let lineAwayGames = 0;
-    let lineHomePoints = 0;
-    let lineAwayPoints = 0;
-    let decidingGame: Game | undefined;
 
     for (const g of lineGames) {
-      lineHomePoints += g.homeScore;
-      lineAwayPoints += g.awayScore;
-      if (g.homeScore > g.awayScore) lineHomeGames += 1;
-      else if (g.awayScore > g.homeScore) lineAwayGames += 1;
-      // exact ties contribute to neither side's game count
-      if (!decidingGame || g.gameNumber > decidingGame.gameNumber) {
-        decidingGame = g;
+      homePointsScored += g.homeScore;
+      awayPointsScored += g.awayScore;
+
+      if (g.homeScore > g.awayScore) {
+        lineHomeGames += 1;
+        if (cons.enabled && g.awayScore >= cons.min_loser_score) {
+          awayConsolation += cons.points;
+        }
+      } else if (g.awayScore > g.homeScore) {
+        lineAwayGames += 1;
+        if (cons.enabled && g.homeScore >= cons.min_loser_score) {
+          homeConsolation += cons.points;
+        }
       }
+      // exact ties contribute to neither side's game count
     }
 
     homeGamesWon += lineHomeGames;
     awayGamesWon += lineAwayGames;
-    homePointsScored += lineHomePoints;
-    awayPointsScored += lineAwayPoints;
 
-    const lineWinner = decideLineWinner(config, {
-      homeGames: lineHomeGames,
-      awayGames: lineAwayGames,
-      homePoints: lineHomePoints,
-      awayPoints: lineAwayPoints,
-      lastGameWinner: gameWinner(decidingGame),
-    });
-    if (lineWinner === "home") homeLinesWon += 1;
-    else if (lineWinner === "away") awayLinesWon += 1;
+    // Line winner is for display/standings only; it awards no match points.
+    if (lineHomeGames > lineAwayGames) homeLinesWon += 1;
+    else if (lineAwayGames > lineHomeGames) awayLinesWon += 1;
+    // level on games + no deciding game => the line has no winner
   }
 
-  const perGamePoint = config.pointsPerGamePoint ?? 0;
-
-  const home: SideTotals = {
-    points:
-      homeGamesWon * config.pointsPerGameWin +
-      homeLinesWon * config.pointsPerLineWin +
-      homePointsScored * perGamePoint,
-    linesWon: homeLinesWon,
-    linesLost: awayLinesWon,
+  const home = buildTotals({
     gamesWon: homeGamesWon,
     gamesLost: awayGamesWon,
+    linesWon: homeLinesWon,
+    linesLost: awayLinesWon,
+    consolation: homeConsolation,
     pointsScored: homePointsScored,
-    pointDifferential: homePointsScored - awayPointsScored,
-  };
+    opponentPointsScored: awayPointsScored,
+    config,
+  });
 
-  const away: SideTotals = {
-    points:
-      awayGamesWon * config.pointsPerGameWin +
-      awayLinesWon * config.pointsPerLineWin +
-      awayPointsScored * perGamePoint,
-    linesWon: awayLinesWon,
-    linesLost: homeLinesWon,
+  const away = buildTotals({
     gamesWon: awayGamesWon,
     gamesLost: homeGamesWon,
+    linesWon: awayLinesWon,
+    linesLost: homeLinesWon,
+    consolation: awayConsolation,
     pointsScored: awayPointsScored,
-    pointDifferential: awayPointsScored - homePointsScored,
-  };
+    opponentPointsScored: homePointsScored,
+    config,
+  });
 
   const matchWinner = decideMatchWinner(config, home, away);
 
@@ -112,44 +111,26 @@ function groupByLine(games: Game[]): Map<number, Game[]> {
   return byLine;
 }
 
-function gameWinner(g: Game | undefined): Side | "unset" {
-  if (!g) return "unset";
-  if (g.homeScore > g.awayScore) return "home";
-  if (g.awayScore > g.homeScore) return "away";
-  return "unset";
-}
-
-function decideLineWinner(
-  config: ScoringConfig,
-  line: {
-    homeGames: number;
-    awayGames: number;
-    homePoints: number;
-    awayPoints: number;
-    lastGameWinner: Side | "unset";
-  },
-): Side | "unset" {
-  if (config.lineWinBy === "point_differential") {
-    if (line.homePoints > line.awayPoints) return "home";
-    if (line.awayPoints > line.homePoints) return "away";
-    return "unset";
-  }
-
-  // default: games_won
-  if (line.homeGames > line.awayGames) return "home";
-  if (line.awayGames > line.homeGames) return "away";
-
-  // games level — apply line tiebreak
-  switch (config.lineTiebreak ?? "none") {
-    case "last_game":
-      return line.lastGameWinner;
-    case "point_differential":
-      if (line.homePoints > line.awayPoints) return "home";
-      if (line.awayPoints > line.homePoints) return "away";
-      return "unset";
-    default:
-      return "unset";
-  }
+function buildTotals(args: {
+  gamesWon: number;
+  gamesLost: number;
+  linesWon: number;
+  linesLost: number;
+  consolation: number;
+  pointsScored: number;
+  opponentPointsScored: number;
+  config: ScoringConfig;
+}): SideTotals {
+  return {
+    points: args.gamesWon * args.config.points_per_game_win + args.consolation,
+    gamesWon: args.gamesWon,
+    gamesLost: args.gamesLost,
+    linesWon: args.linesWon,
+    linesLost: args.linesLost,
+    consolationPoints: args.consolation,
+    pointsScored: args.pointsScored,
+    pointDifferential: args.pointsScored - args.opponentPointsScored,
+  };
 }
 
 function decideMatchWinner(
@@ -160,7 +141,7 @@ function decideMatchWinner(
   if (home.points > away.points) return "home";
   if (away.points > home.points) return "away";
 
-  for (const tb of config.matchTiebreakers ?? []) {
+  for (const tb of config.match_tiebreakers ?? []) {
     const [h, a] = tiebreakValues(tb, home, away);
     if (h > a) return "home";
     if (a > h) return "away";
@@ -174,10 +155,12 @@ function tiebreakValues(
   away: SideTotals,
 ): [number, number] {
   switch (tb) {
-    case "lines_won":
-      return [home.linesWon, away.linesWon];
     case "games_won":
       return [home.gamesWon, away.gamesWon];
+    case "lines_won":
+      return [home.linesWon, away.linesWon];
+    case "consolation":
+      return [home.consolationPoints, away.consolationPoints];
     case "point_differential":
       return [home.pointDifferential, away.pointDifferential];
   }
@@ -188,8 +171,7 @@ function toDelta(
   totals: SideTotals,
   winner: MatchOutcome,
 ): StandingsDelta {
-  const result =
-    winner === "tie" ? "tie" : winner === side ? "win" : "loss";
+  const result = winner === "tie" ? "tie" : winner === side ? "win" : "loss";
   return {
     side,
     ...totals,
