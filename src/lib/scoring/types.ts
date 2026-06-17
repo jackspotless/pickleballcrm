@@ -2,8 +2,10 @@
 // The ScoringConfig shape mirrors the canonical `scoring_format.config` JSON
 // verbatim (same nesting, same key names) so the stored jsonb matches the doc.
 
-/** One game played on a line (e.g. line 3, game 2). */
+/** One game played on a line within a round. */
 export interface Game {
+  roundNumber: number;
+  /** Line/court within the round (1..lines_per_round). */
   lineNumber: number;
   gameNumber: number;
   homeScore: number;
@@ -49,10 +51,23 @@ export interface PointsModelConfig {
   consolation: ConsolationRule;
 }
 
-export type MatchDecidedBy = "total_points";
+export type MatchDecidedBy = "total_team_points";
+
+/** Single-match tiebreaker rung (rulebook VI.E.3). */
+export type MatchTiebreakerField =
+  | "games_won"
+  | "total_points_scored"
+  | "opponent_points_scored"
+  | "rounds_won";
+
+export interface MatchTiebreaker {
+  field: MatchTiebreakerField;
+  dir: "asc" | "desc";
+}
 
 export interface MatchOutcomeConfig {
   decided_by: MatchDecidedBy;
+  tiebreakers?: MatchTiebreaker[];
 }
 
 export interface StandingsSort {
@@ -86,6 +101,8 @@ export interface SideTotals {
   gamesLost: number;
   linesWon: number;
   linesLost: number;
+  /** Rounds won (a round goes to the side with the majority of its games). */
+  roundsWon: number;
   /** Consolation points earned across all games. */
   consolationPoints: number;
   /** Total raw points scored across all games. */

@@ -1,14 +1,14 @@
 /**
- * End-to-end anchor check: read the seeded 04/07/2026 match back out of
- * Postgres, score it with the *stored* scoring_format config via the real
- * engine, and assert away 21 / home 24, winner Benchies United.
- *
- * Guards against silent drift in the schema, the seed, OR the engine — any of
- * them breaking the anchor fails CI. Run after `npm run seed`.
+ * End-to-end anchor + structure check: read the seeded 04/07/2026 match back
+ * out of Postgres, score it with the *stored* config via the real engine, and
+ * assert away 21 / home 24, winner Benchies United — AND that the rounds-aware
+ * match_line rows carry correct per-row round/pair values (not a uniform
+ * backfill). Guards schema, seed, and engine drift. Run after `npm run seed`.
  */
 import { config as loadEnv } from "dotenv";
 import { Client } from "pg";
 import { scoreMatch } from "../src/lib/scoring/engine";
+import { ATPL_ROTATION } from "../src/lib/match/rotation";
 import type { Game, ScoringConfig } from "../src/lib/scoring/types";
 
 loadEnv({ path: ".env.local" });
@@ -18,6 +18,11 @@ const connectionString =
   "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
 
 const db = new Client({ connectionString });
+
+function fail(msg: string): never {
+  console.error(`❌ ${msg}`);
+  process.exit(1);
+}
 
 async function main() {
   await db.connect();
@@ -35,7 +40,7 @@ async function main() {
        where m.status = 'final'
        limit 1`,
     );
-    if (matchRes.rowCount === 0) throw new Error("no final match found");
+    if (matchRes.rowCount === 0) fail("no final match found");
     const { id, home_name, away_name, config } = matchRes.rows[0] as {
       id: string;
       home_name: string;
@@ -43,15 +48,56 @@ async function main() {
       config: ScoringConfig;
     };
 
+    // --- Per-row structure check (rounds-aware integrity) --------------------
+    const linesRes = await db.query(
+      `select round_number, home_pair_index, away_pair_index
+       from match_line where match_id = $1
+       order by round_number, home_pair_index`,
+      [id],
+    );
+    const lines = linesRes.rows as {
+      round_number: number;
+      home_pair_index: number;
+      away_pair_index: number;
+    }[];
+
+    if (lines.length !== 9) fail(`expected 9 match_line rows, got ${lines.length}`);
+    const seen = new Set<string>();
+    const perRound: Record<number, number> = {};
+    for (const l of lines) {
+      const key = `${l.round_number}-${l.home_pair_index}`;
+      if (seen.has(key)) fail(`duplicate (round, home_pair) ${key}`);
+      seen.add(key);
+      perRound[l.round_number] = (perRound[l.round_number] ?? 0) + 1;
+      const expectedAway = ATPL_ROTATION[String(l.round_number)]?.[String(l.home_pair_index)];
+      if (l.away_pair_index !== expectedAway) {
+        fail(
+          `round ${l.round_number} home pair ${l.home_pair_index}: away_pair ${l.away_pair_index} != rotation ${expectedAway}`,
+        );
+      }
+    }
+    if (seen.size !== 9) fail("match_line rows are not 9 distinct (round, home_pair) slots");
+    for (const r of [1, 2, 3]) {
+      if (perRound[r] !== 3) fail(`round ${r} has ${perRound[r] ?? 0} lines, expected 3`);
+    }
+    console.log("match_line rows (round, home_pair, away_pair) — validated vs rotation:");
+    for (const l of lines) {
+      console.log(
+        `  round ${l.round_number}  home_pair ${l.home_pair_index} -> away_pair ${l.away_pair_index}`,
+      );
+    }
+
+    // --- Scoring check -------------------------------------------------------
     const gamesRes = await db.query(
-      `select ml.line_number, lg.game_number, lg.home_score, lg.away_score
+      `select ml.round_number, ml.home_pair_index, lg.game_number, lg.home_score, lg.away_score
        from match_line ml
        join line_game lg on lg.match_line_id = ml.id
        where ml.match_id = $1`,
       [id],
     );
     const games: Game[] = gamesRes.rows.map((r) => ({
-      lineNumber: r.line_number,
+      roundNumber: r.round_number,
+      lineNumber: r.home_pair_index,
       gameNumber: r.game_number,
       homeScore: r.home_score,
       awayScore: r.away_score,
@@ -59,29 +105,22 @@ async function main() {
 
     const { matchTotals, matchWinner } = scoreMatch(games, config);
     const winnerName =
-      matchWinner === "home"
-        ? home_name
-        : matchWinner === "away"
-          ? away_name
-          : "TIE";
+      matchWinner === "home" ? home_name : matchWinner === "away" ? away_name : "TIE";
 
     console.log(
-      `Anchor: ${away_name} ${matchTotals.away.points} @ ${home_name} ${matchTotals.home.points} — winner ${winnerName}`,
+      `Anchor: ${away_name} ${matchTotals.away.points} @ ${home_name} ${matchTotals.home.points} — winner ${winnerName} (rounds won ${matchTotals.home.roundsWon}-${matchTotals.away.roundsWon})`,
     );
 
-    const ok =
-      matchTotals.away.points === 21 &&
-      matchTotals.home.points === 24 &&
-      winnerName === "Benchies United";
-
-    if (!ok) {
-      console.error(
-        "❌ Anchor mismatch — expected away 21 / home 24, winner Benchies United.",
-      );
-      process.exit(1);
+    if (matchTotals.away.points !== 21 || matchTotals.home.points !== 24) {
+      fail(`expected away 21 / home 24, got away ${matchTotals.away.points} / home ${matchTotals.home.points}`);
     }
+    if (winnerName !== "Benchies United") fail(`winner ${winnerName}, expected Benchies United`);
+    if (matchTotals.home.roundsWon !== 1 || matchTotals.away.roundsWon !== 1) {
+      fail(`expected rounds won 1-1, got ${matchTotals.home.roundsWon}-${matchTotals.away.roundsWon}`);
+    }
+
     console.log(
-      "✅ 21/24 anchor verified end-to-end (DB seed + stored config + engine).",
+      "✅ 21/24 anchor + rounds-aware structure verified end-to-end (DB seed + stored config + engine).",
     );
   } finally {
     await db.end();

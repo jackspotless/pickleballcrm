@@ -22,7 +22,15 @@ export const ATPL_SCORING_CONFIG: ScoringConfig = {
     per_game_loss: 0,
     consolation: { enabled: true, min_loser_score: 6, points: 1 },
   },
-  match_outcome: { decided_by: "total_points" },
+  match_outcome: {
+    decided_by: "total_team_points",
+    tiebreakers: [
+      { field: "games_won", dir: "desc" },
+      { field: "total_points_scored", dir: "desc" },
+      { field: "opponent_points_scored", dir: "asc" },
+      { field: "rounds_won", dir: "desc" },
+    ],
+  },
   standings: {
     win_points: 2,
     loss_points: 0,
