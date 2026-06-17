@@ -80,6 +80,12 @@ async function main() {
     for (const r of [1, 2, 3]) {
       if (perRound[r] !== 3) fail(`round ${r} has ${perRound[r] ?? 0} lines, expected 3`);
     }
+    console.log("match_line rows (round, home_pair, away_pair) — validated vs rotation:");
+    for (const l of lines) {
+      console.log(
+        `  round ${l.round_number}  home_pair ${l.home_pair_index} -> away_pair ${l.away_pair_index}`,
+      );
+    }
 
     // --- Scoring check -------------------------------------------------------
     const gamesRes = await db.query(
