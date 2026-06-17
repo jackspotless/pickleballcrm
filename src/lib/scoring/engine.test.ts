@@ -31,7 +31,7 @@ const SIMPLE: ScoringConfig = {
 };
 
 describe("scoreMatch — mechanics", () => {
-  it("awards points_per_game_win to each game winner", () => {
+  it("awards points_model.per_game_win to each game winner", () => {
     const games: Game[] = [
       { lineNumber: 1, gameNumber: 1, homeScore: 11, awayScore: 3 },
       { lineNumber: 1, gameNumber: 2, homeScore: 11, awayScore: 4 },
