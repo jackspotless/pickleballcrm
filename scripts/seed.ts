@@ -1,17 +1,15 @@
 /**
- * Phase 1 seed: Desert ATPL league, one season, the "Men 18+ Open" division
- * with the ATPL scoring config, 4 teams, and the verified 04/07/2026 match
- * (Other Desert Cities 21 @ Benchies United 24).
+ * Phase 1+2 seed: Desert ATPL league, season (under the ATPL rule_set), the
+ * "Men 18+ Open" division, 4 teams, and the verified 04/07/2026 match
+ * (Other Desert Cities 21 @ Benchies United 24), generated rounds-aware.
  *
  * Seeds over a direct Postgres connection (superuser) so it bypasses PostgREST
- * and RLS — the standard way to seed, and immune to API-key/role churn.
- *   1. supabase start
- *   2. cp .env.local.example .env.local   # DATABASE_URL is the local default
- *   3. npm run db:reset && npm run seed
+ * and RLS. Run after `npm run db:reset` on a fresh DB.
  */
 import { config as loadEnv } from "dotenv";
 import { Client } from "pg";
 import { ATPL_SCORING_CONFIG } from "../src/lib/scoring/atpl-config";
+import { ATPL_ROTATION, generateSlots } from "../src/lib/match/rotation";
 
 loadEnv({ path: ".env.local" });
 
@@ -26,37 +24,48 @@ async function insertId(sql: string, params: unknown[]): Promise<string> {
   return res.rows[0].id as string;
 }
 
+// --- ATPL rule_set structure (drives §1 row generation) ---------------------
+const ATPL_STRUCTURE = {
+  rounds: 3,
+  lines_per_round: 3,
+  games_per_line: 2,
+  rotation: ATPL_ROTATION,
+};
+const ATPL_HUMAN_RULES = {
+  subs: "one sub/match, pre-listed, injury/illness/lateness only (VI.G)",
+  min_age: 18,
+  waiver: "e-sign before first match each season (II.B.1)",
+};
+
 // --- Verified 04/07/2026 match ----------------------------------------------
-// Pairs are stable across the match. Scores are [away, home] per game.
 const HOME_TEAM = "Benchies United";
 const AWAY_TEAM = "Other Desert Cities";
 // First names were not in the source; surnames are stored as last_name.
-const HOME_PLAYERS = ["Mercado", "Donovan", "Tejada", "Elias", "Michaud", "Rahman"];
-const AWAY_PLAYERS = ["Gruwell", "Prusso", "Saenz", "Devane", "Purcell", "Lynch"];
-
-type LineSeed = {
-  line: number;
-  away: [string, string];
-  home: [string, string];
-  games: [number, number][]; // [awayScore, homeScore]
+// Pair index 1..3 -> [player a, player b].
+const HOME_PAIRS: Record<number, [string, string]> = {
+  1: ["Mercado", "Donovan"],
+  2: ["Tejada", "Elias"],
+  3: ["Michaud", "Rahman"],
+};
+const AWAY_PAIRS: Record<number, [string, string]> = {
+  1: ["Gruwell", "Prusso"],
+  2: ["Saenz", "Devane"],
+  3: ["Purcell", "Lynch"],
+};
+// Scores keyed by `${round}-${homePairIndex}` as [awayScore, homeScore] per game.
+const SCORES: Record<string, [number, number][]> = {
+  "1-1": [[3, 11], [12, 10]],
+  "1-2": [[10, 12], [7, 11]],
+  "1-3": [[3, 11], [0, 11]],
+  "2-1": [[4, 11], [3, 11]],
+  "2-2": [[11, 4], [11, 2]],
+  "2-3": [[8, 11], [11, 5]],
+  "3-1": [[11, 8], [11, 2]],
+  "3-2": [[11, 8], [11, 9]],
+  "3-3": [[11, 13], [8, 11]],
 };
 
-const LINES: LineSeed[] = [
-  { line: 1, away: ["Gruwell", "Prusso"], home: ["Mercado", "Donovan"], games: [[3, 11], [12, 10]] },
-  { line: 2, away: ["Saenz", "Devane"], home: ["Tejada", "Elias"], games: [[10, 12], [7, 11]] },
-  { line: 3, away: ["Purcell", "Lynch"], home: ["Michaud", "Rahman"], games: [[3, 11], [0, 11]] },
-  { line: 4, away: ["Saenz", "Devane"], home: ["Mercado", "Donovan"], games: [[4, 11], [3, 11]] },
-  { line: 5, away: ["Purcell", "Lynch"], home: ["Tejada", "Elias"], games: [[11, 4], [11, 2]] },
-  { line: 6, away: ["Gruwell", "Prusso"], home: ["Michaud", "Rahman"], games: [[8, 11], [11, 5]] },
-  { line: 7, away: ["Purcell", "Lynch"], home: ["Mercado", "Donovan"], games: [[11, 8], [11, 2]] },
-  { line: 8, away: ["Gruwell", "Prusso"], home: ["Tejada", "Elias"], games: [[11, 8], [11, 9]] },
-  { line: 9, away: ["Saenz", "Devane"], home: ["Michaud", "Rahman"], games: [[11, 13], [8, 11]] },
-];
-
-/**
- * ATPL line winner: the side that won more games. With tiebreak_game disabled,
- * a level (e.g. 1-1) line has no winner.
- */
+/** ATPL line winner: majority of games; tiebreak_game disabled => split = unset. */
 function lineWinner(games: [number, number][]): "home" | "away" | "unset" {
   let away = 0;
   let home = 0;
@@ -70,34 +79,44 @@ function lineWinner(games: [number, number][]): "home" | "away" | "unset" {
 }
 
 async function seed() {
-  // --- Tenancy ---------------------------------------------------------------
+  // --- Tenancy + rule set ----------------------------------------------------
   const leagueId = await insertId(
     "insert into league (name, subdomain, theme) values ($1, $2, $3) returning id",
     ["Desert ATPL", "desert", "classic"],
   );
 
-  const seasonId = await insertId(
-    `insert into season (league_id, name, starts_on, ends_on, status)
-     values ($1, $2, $3, $4, $5) returning id`,
-    [leagueId, "Spring 2026", "2026-03-01", "2026-06-30", "active"],
-  );
-
-  // --- Scoring + division ----------------------------------------------------
   const scoringFormatId = await insertId(
     `insert into scoring_format (league_id, name, config, is_template)
      values ($1, $2, $3::jsonb, $4) returning id`,
     [leagueId, "ATPL Standard", JSON.stringify(ATPL_SCORING_CONFIG), false],
   );
 
+  const ruleSetId = await insertId(
+    `insert into rule_set (league_id, name, scoring_format_id, structure, human_rules, is_template)
+     values ($1, $2, $3, $4::jsonb, $5::jsonb, $6) returning id`,
+    [
+      leagueId,
+      "ATPL",
+      scoringFormatId,
+      JSON.stringify(ATPL_STRUCTURE),
+      JSON.stringify(ATPL_HUMAN_RULES),
+      false,
+    ],
+  );
+
+  const seasonId = await insertId(
+    `insert into season (league_id, rule_set_id, name, starts_on, ends_on, status)
+     values ($1, $2, $3, $4, $5, $6) returning id`,
+    [leagueId, ruleSetId, "Spring 2026", "2026-03-01", "2026-06-30", "active"],
+  );
+
   const divisionId = await insertId(
-    `insert into division
-       (season_id, name, scoring_format_id, lines, games_per_line, doubles_lines, singles_lines)
-     values ($1, $2, $3, $4, $5, $6, $7) returning id`,
-    [seasonId, "Men 18+ Open", scoringFormatId, 9, 2, 9, 0],
+    `insert into division (season_id, name, scoring_format_id)
+     values ($1, $2, $3) returning id`,
+    [seasonId, "Men 18+ Open", scoringFormatId],
   );
 
   // --- Teams (the two opponents + two placeholders) --------------------------
-  // TODO: replace the placeholder names once the other two teams are confirmed.
   const teamNames = [HOME_TEAM, AWAY_TEAM, "TBD Team 3", "TBD Team 4"];
   const teams: Record<string, string> = {};
   for (const name of teamNames) {
@@ -123,41 +142,39 @@ async function seed() {
       );
     }
   }
-  await seedRoster(HOME_TEAM, HOME_PLAYERS);
-  await seedRoster(AWAY_TEAM, AWAY_PLAYERS);
+  await seedRoster(HOME_TEAM, Object.values(HOME_PAIRS).flat());
+  await seedRoster(AWAY_TEAM, Object.values(AWAY_PAIRS).flat());
 
   // --- 04/07/2026 match ------------------------------------------------------
   const matchId = await insertId(
     `insert into match (division_id, home_team_id, away_team_id, scheduled_at, week_number, match_type, status)
      values ($1, $2, $3, $4, $5, $6, $7) returning id`,
-    [
-      divisionId,
-      teams[HOME_TEAM],
-      teams[AWAY_TEAM],
-      "2026-04-07T18:00:00Z",
-      1,
-      "match",
-      "final",
-    ],
+    [divisionId, teams[HOME_TEAM], teams[AWAY_TEAM], "2026-04-07T18:00:00Z", 1, "match", "final"],
   );
 
-  for (const line of LINES) {
+  // Generate the 9 rounds-aware match_line rows from the rule_set rotation.
+  const slots = generateSlots(
+    ATPL_STRUCTURE.rounds,
+    ATPL_STRUCTURE.lines_per_round,
+    ATPL_STRUCTURE.rotation,
+  );
+  for (const slot of slots) {
+    const games = SCORES[`${slot.round}-${slot.homePair}`];
+    const [hp1, hp2] = HOME_PAIRS[slot.homePair];
+    const [ap1, ap2] = AWAY_PAIRS[slot.awayPair];
     const matchLineId = await insertId(
       `insert into match_line
-         (match_id, line_number, away_player1_id, away_player2_id, home_player1_id, home_player2_id, winner)
-       values ($1, $2, $3, $4, $5, $6, $7) returning id`,
+         (match_id, round_number, home_pair_index, away_pair_index,
+          home_player1_id, home_player2_id, away_player1_id, away_player2_id, winner)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id`,
       [
-        matchId,
-        line.line,
-        members[line.away[0]],
-        members[line.away[1]],
-        members[line.home[0]],
-        members[line.home[1]],
-        lineWinner(line.games),
+        matchId, slot.round, slot.homePair, slot.awayPair,
+        members[hp1], members[hp2], members[ap1], members[ap2],
+        lineWinner(games),
       ],
     );
-    for (let i = 0; i < line.games.length; i++) {
-      const [awayScore, homeScore] = line.games[i];
+    for (let i = 0; i < games.length; i++) {
+      const [awayScore, homeScore] = games[i];
       await db.query(
         `insert into line_game (match_line_id, game_number, away_score, home_score)
          values ($1, $2, $3, $4)`,
@@ -168,12 +185,13 @@ async function seed() {
 
   console.log("✅ Seed complete:", {
     league: leagueId,
+    rule_set: ruleSetId,
     season: seasonId,
     division: divisionId,
     teams: Object.keys(teams).length,
     members: Object.keys(members).length,
     match: matchId,
-    lines: LINES.length,
+    match_lines: slots.length,
   });
 }
 
