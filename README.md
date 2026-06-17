@@ -9,8 +9,9 @@ deployed on Netlify.
 - ✅ Project scaffold (Next.js + TypeScript + Supabase clients)
 - ✅ Phase 1 migration: core tables, enums, FKs, RLS + policies, tenancy helpers
 - ✅ Scoring engine (pure, unit-tested) — not wired to UI
-- 🚧 Seed: league/season/division/teams/match shell in place; awaiting the
-  verified 04/07/2026 line scores and the final ATPL scoring config
+- ✅ Seed: Desert ATPL league/season/Men 18+ Open division/4 teams/12 rostered
+  players and the verified 04/07/2026 match (Other Desert Cities 21 @ Benchies
+  United 24)
 
 No UI features, registration, or payments yet.
 

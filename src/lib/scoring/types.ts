@@ -36,7 +36,7 @@ export interface ScoringConfig {
   /** How each line's winner is determined. */
   lineWinBy: LineWinBy;
   /** When `lineWinBy: "games_won"` ends level, break the line by this. */
-  lineTiebreak?: "point_differential" | "none";
+  lineTiebreak?: "last_game" | "point_differential" | "none";
   /** Order of tiebreakers for the overall match winner. */
   matchTiebreakers?: MatchTiebreaker[];
 }

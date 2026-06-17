@@ -33,6 +33,7 @@ export function scoreMatch(
     let lineAwayGames = 0;
     let lineHomePoints = 0;
     let lineAwayPoints = 0;
+    let decidingGame: Game | undefined;
 
     for (const g of lineGames) {
       lineHomePoints += g.homeScore;
@@ -40,6 +41,9 @@ export function scoreMatch(
       if (g.homeScore > g.awayScore) lineHomeGames += 1;
       else if (g.awayScore > g.homeScore) lineAwayGames += 1;
       // exact ties contribute to neither side's game count
+      if (!decidingGame || g.gameNumber > decidingGame.gameNumber) {
+        decidingGame = g;
+      }
     }
 
     homeGamesWon += lineHomeGames;
@@ -52,6 +56,7 @@ export function scoreMatch(
       awayGames: lineAwayGames,
       homePoints: lineHomePoints,
       awayPoints: lineAwayPoints,
+      lastGameWinner: gameWinner(decidingGame),
     });
     if (lineWinner === "home") homeLinesWon += 1;
     else if (lineWinner === "away") awayLinesWon += 1;
@@ -107,6 +112,13 @@ function groupByLine(games: Game[]): Map<number, Game[]> {
   return byLine;
 }
 
+function gameWinner(g: Game | undefined): Side | "unset" {
+  if (!g) return "unset";
+  if (g.homeScore > g.awayScore) return "home";
+  if (g.awayScore > g.homeScore) return "away";
+  return "unset";
+}
+
 function decideLineWinner(
   config: ScoringConfig,
   line: {
@@ -114,6 +126,7 @@ function decideLineWinner(
     awayGames: number;
     homePoints: number;
     awayPoints: number;
+    lastGameWinner: Side | "unset";
   },
 ): Side | "unset" {
   if (config.lineWinBy === "point_differential") {
@@ -127,11 +140,16 @@ function decideLineWinner(
   if (line.awayGames > line.homeGames) return "away";
 
   // games level — apply line tiebreak
-  if ((config.lineTiebreak ?? "none") === "point_differential") {
-    if (line.homePoints > line.awayPoints) return "home";
-    if (line.awayPoints > line.homePoints) return "away";
+  switch (config.lineTiebreak ?? "none") {
+    case "last_game":
+      return line.lastGameWinner;
+    case "point_differential":
+      if (line.homePoints > line.awayPoints) return "home";
+      if (line.awayPoints > line.homePoints) return "away";
+      return "unset";
+    default:
+      return "unset";
   }
-  return "unset";
 }
 
 function decideMatchWinner(
