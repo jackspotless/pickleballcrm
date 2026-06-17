@@ -4,10 +4,30 @@ import { ATPL_SCORING_CONFIG } from "./atpl-config";
 import type { Game, ScoringConfig } from "./types";
 
 const SIMPLE: ScoringConfig = {
-  points_per_game_win: 2,
-  consolation: { enabled: true, min_loser_score: 6, points: 1 },
-  tiebreak_game: { enabled: false },
-  match_tiebreakers: ["games_won", "consolation", "point_differential"],
+  structure: { lines: 9, games_per_line: 2, doubles_lines: 9, singles_lines: 0 },
+  game_rule: {
+    target_score: 11,
+    win_by: 2,
+    hard_cap: null,
+    tiebreak_game: { enabled: false },
+  },
+  points_model: {
+    per_game_win: 2,
+    per_game_loss: 0,
+    consolation: { enabled: true, min_loser_score: 6, points: 1 },
+  },
+  match_outcome: { decided_by: "total_points" },
+  standings: {
+    win_points: 2,
+    loss_points: 0,
+    tie_points: 1,
+    columns: ["Won", "Lost", "Tie", "SP", "TP", "OP"],
+    sort: [
+      { field: "SP", dir: "desc" },
+      { field: "TP", dir: "desc" },
+      { field: "OP", dir: "asc" },
+    ],
+  },
 };
 
 describe("scoreMatch — mechanics", () => {
@@ -46,7 +66,10 @@ describe("scoreMatch — mechanics", () => {
     expect(scoreMatch(games, SIMPLE).matchTotals.away.consolationPoints).toBe(1);
     const higher: ScoringConfig = {
       ...SIMPLE,
-      consolation: { enabled: true, min_loser_score: 7, points: 1 },
+      points_model: {
+        ...SIMPLE.points_model,
+        consolation: { enabled: true, min_loser_score: 7, points: 1 },
+      },
     };
     expect(scoreMatch(games, higher).matchTotals.away.consolationPoints).toBe(0);
   });
@@ -70,9 +93,13 @@ describe("scoreMatch — mechanics", () => {
     expect(matchWinner).toBe("home");
     const [home, away] = standingsDeltas;
     expect(home.result).toBe("win");
-    expect(home.win).toBe(1);
+    expect(home.won).toBe(1);
+    expect(home.standingsPoints).toBe(2); // win_points
+    expect(home.pointsFor).toBe(home.points);
+    expect(home.pointsAgainst).toBe(away.points);
     expect(away.result).toBe("loss");
-    expect(away.loss).toBe(1);
+    expect(away.lost).toBe(1);
+    expect(away.standingsPoints).toBe(0); // loss_points
   });
 });
 

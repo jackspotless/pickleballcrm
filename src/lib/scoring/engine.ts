@@ -1,7 +1,6 @@
 import type {
   Game,
   MatchOutcome,
-  MatchTiebreaker,
   ScoringConfig,
   ScoringResult,
   Side,
@@ -12,11 +11,11 @@ import type {
 /**
  * Pure scoring engine: (games, config) => match totals, winner, standings deltas.
  *
- * ATPL scoring is per-game: the game winner earns `points_per_game_win`, and the
- * loser earns a consolation point when it reaches `consolation.min_loser_score`.
- * Lines don't award points directly — a line winner is tracked only for display
- * and standings tiebreakers, and a split line has no winner unless a deciding
- * game is enabled.
+ * ATPL scoring is per-game: the game winner earns `points_model.per_game_win`,
+ * the loser earns `points_model.per_game_loss` plus a consolation point when it
+ * reaches `points_model.consolation.min_loser_score`. Lines don't award points —
+ * a line winner is tracked only for display/standings, and a split line has no
+ * winner unless `game_rule.tiebreak_game.enabled` is set.
  *
  * Deterministic and side-effect free so the seed, API, and UI can reuse it.
  */
@@ -25,7 +24,7 @@ export function scoreMatch(
   config: ScoringConfig,
 ): ScoringResult {
   const lines = groupByLine(games);
-  const cons = config.consolation;
+  const cons = config.points_model.consolation;
 
   let homeGamesWon = 0;
   let awayGamesWon = 0;
@@ -68,6 +67,7 @@ export function scoreMatch(
   }
 
   const home = buildTotals({
+    config,
     gamesWon: homeGamesWon,
     gamesLost: awayGamesWon,
     linesWon: homeLinesWon,
@@ -75,10 +75,10 @@ export function scoreMatch(
     consolation: homeConsolation,
     pointsScored: homePointsScored,
     opponentPointsScored: awayPointsScored,
-    config,
   });
 
   const away = buildTotals({
+    config,
     gamesWon: awayGamesWon,
     gamesLost: homeGamesWon,
     linesWon: awayLinesWon,
@@ -86,7 +86,6 @@ export function scoreMatch(
     consolation: awayConsolation,
     pointsScored: awayPointsScored,
     opponentPointsScored: homePointsScored,
-    config,
   });
 
   const matchWinner = decideMatchWinner(config, home, away);
@@ -95,8 +94,8 @@ export function scoreMatch(
     matchTotals: { home, away },
     matchWinner,
     standingsDeltas: [
-      toDelta("home", home, matchWinner),
-      toDelta("away", away, matchWinner),
+      toDelta("home", home, away.points, matchWinner, config),
+      toDelta("away", away, home.points, matchWinner, config),
     ],
   };
 }
@@ -112,6 +111,7 @@ function groupByLine(games: Game[]): Map<number, Game[]> {
 }
 
 function buildTotals(args: {
+  config: ScoringConfig;
   gamesWon: number;
   gamesLost: number;
   linesWon: number;
@@ -119,10 +119,13 @@ function buildTotals(args: {
   consolation: number;
   pointsScored: number;
   opponentPointsScored: number;
-  config: ScoringConfig;
 }): SideTotals {
+  const pm = args.config.points_model;
   return {
-    points: args.gamesWon * args.config.points_per_game_win + args.consolation,
+    points:
+      args.gamesWon * pm.per_game_win +
+      args.gamesLost * pm.per_game_loss +
+      args.consolation,
     gamesWon: args.gamesWon,
     gamesLost: args.gamesLost,
     linesWon: args.linesWon,
@@ -138,46 +141,39 @@ function decideMatchWinner(
   home: SideTotals,
   away: SideTotals,
 ): MatchOutcome {
-  if (home.points > away.points) return "home";
-  if (away.points > home.points) return "away";
-
-  for (const tb of config.match_tiebreakers ?? []) {
-    const [h, a] = tiebreakValues(tb, home, away);
-    if (h > a) return "home";
-    if (a > h) return "away";
-  }
-  return "tie";
-}
-
-function tiebreakValues(
-  tb: MatchTiebreaker,
-  home: SideTotals,
-  away: SideTotals,
-): [number, number] {
-  switch (tb) {
-    case "games_won":
-      return [home.gamesWon, away.gamesWon];
-    case "lines_won":
-      return [home.linesWon, away.linesWon];
-    case "consolation":
-      return [home.consolationPoints, away.consolationPoints];
-    case "point_differential":
-      return [home.pointDifferential, away.pointDifferential];
+  switch (config.match_outcome.decided_by) {
+    case "total_points":
+    default:
+      if (home.points > away.points) return "home";
+      if (away.points > home.points) return "away";
+      return "tie";
   }
 }
 
 function toDelta(
   side: Side,
   totals: SideTotals,
+  opponentPoints: number,
   winner: MatchOutcome,
+  config: ScoringConfig,
 ): StandingsDelta {
   const result = winner === "tie" ? "tie" : winner === side ? "win" : "loss";
+  const s = config.standings;
+  const standingsPoints =
+    result === "win"
+      ? s.win_points
+      : result === "loss"
+        ? s.loss_points
+        : s.tie_points;
   return {
     side,
     ...totals,
     result,
-    win: result === "win" ? 1 : 0,
-    loss: result === "loss" ? 1 : 0,
-    tie: result === "tie" ? 1 : 0,
+    won: result === "win" ? 1 : 0,
+    lost: result === "loss" ? 1 : 0,
+    tied: result === "tie" ? 1 : 0,
+    standingsPoints,
+    pointsFor: totals.points,
+    pointsAgainst: opponentPoints,
   };
 }

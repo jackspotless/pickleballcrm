@@ -1,4 +1,6 @@
 // Pure scoring-engine types. No I/O, no Supabase — just data in, data out.
+// The ScoringConfig shape mirrors the canonical `scoring_format.config` JSON
+// verbatim (same nesting, same key names) so the stored jsonb matches the doc.
 
 /** One game played on a line (e.g. line 3, game 2). */
 export interface Game {
@@ -11,15 +13,28 @@ export interface Game {
 export type Side = "home" | "away";
 export type MatchOutcome = Side | "tie";
 
-/** Tiebreakers applied, in order, when match points are equal. */
-export type MatchTiebreaker =
-  | "games_won"
-  | "lines_won"
-  | "consolation"
-  | "point_differential";
+// ---- Canonical config blocks -----------------------------------------------
+
+export interface StructureConfig {
+  lines: number;
+  games_per_line: number;
+  doubles_lines: number;
+  singles_lines: number;
+}
+
+export interface TiebreakGameRule {
+  enabled: boolean;
+}
+
+export interface GameRuleConfig {
+  target_score: number;
+  win_by: number;
+  hard_cap: number | null;
+  tiebreak_game: TiebreakGameRule;
+}
 
 /**
- * Consolation rule: the losing side of a game earns `points` if it reached at
+ * Consolation: the losing side of a game earns `points` when it reaches at
  * least `min_loser_score`. (ATPL: 1 pt when a game's loser reaches 6.)
  */
 export interface ConsolationRule {
@@ -28,28 +43,40 @@ export interface ConsolationRule {
   points: number;
 }
 
-/**
- * Whether a deciding (tiebreak) game is played when a line is level on games.
- * ATPL: disabled — a split line simply has no winner.
- */
-export interface TiebreakGameRule {
-  enabled: boolean;
+export interface PointsModelConfig {
+  per_game_win: number;
+  per_game_loss: number;
+  consolation: ConsolationRule;
 }
 
-/**
- * The `scoring_format.config` JSON, typed. Keys mirror the data-model doc so the
- * stored jsonb matches it verbatim. ATPL values are pinned in atpl-config.ts.
- */
-export interface ScoringConfig {
-  /** Points awarded to the winner of each game. */
-  points_per_game_win: number;
-  /** Per-game consolation for the loser. */
-  consolation: ConsolationRule;
-  /** Deciding-game behavior for split lines. */
-  tiebreak_game: TiebreakGameRule;
-  /** Order of tiebreakers for the overall match winner. */
-  match_tiebreakers?: MatchTiebreaker[];
+export type MatchDecidedBy = "total_points";
+
+export interface MatchOutcomeConfig {
+  decided_by: MatchDecidedBy;
 }
+
+export interface StandingsSort {
+  field: string;
+  dir: "asc" | "desc";
+}
+
+export interface StandingsConfig {
+  win_points: number;
+  loss_points: number;
+  tie_points: number;
+  columns: string[];
+  sort: StandingsSort[];
+}
+
+export interface ScoringConfig {
+  structure: StructureConfig;
+  game_rule: GameRuleConfig;
+  points_model: PointsModelConfig;
+  match_outcome: MatchOutcomeConfig;
+  standings: StandingsConfig;
+}
+
+// ---- Engine output ----------------------------------------------------------
 
 /** Per-side rollup used both for match totals and standings deltas. */
 export interface SideTotals {
@@ -67,12 +94,19 @@ export interface SideTotals {
   pointDifferential: number;
 }
 
+/**
+ * One match's contribution to a team's standings row. Field names map to the
+ * canonical `standings.columns`: Won, Lost, Tie, SP, TP, OP.
+ */
 export interface StandingsDelta extends SideTotals {
   side: Side;
   result: "win" | "loss" | "tie";
-  win: 0 | 1;
-  loss: 0 | 1;
-  tie: 0 | 1;
+  won: 0 | 1; // Won
+  lost: 0 | 1; // Lost
+  tied: 0 | 1; // Tie
+  standingsPoints: number; // SP
+  pointsFor: number; // TP
+  pointsAgainst: number; // OP
 }
 
 export interface ScoringResult {
