@@ -55,16 +55,27 @@ async function asAnon(fn: () => Promise<void>) {
   }
 }
 
-/** Assert the next write throws with a specific SQLSTATE. */
-async function expectSqlState(code: string, fn: () => Promise<unknown>) {
-  let err: { code?: string } | undefined;
+/**
+ * Assert the next write throws with a specific SQLSTATE *and* mechanism.
+ * 42501 is shared by RLS-with-check ("new row violates row-level security…")
+ * and missing-grant ("permission denied for table…"), so the message matcher
+ * is required — it's what distinguishes "denied by policy" from "denied by a
+ * missing grant" (the collision that false-passed cases 4/6 before grants).
+ */
+async function expectSqlState(
+  code: string,
+  messageRe: RegExp,
+  fn: () => Promise<unknown>,
+) {
+  let err: { code?: string; message?: string } | undefined;
   try {
     await fn();
   } catch (e) {
-    err = e as { code?: string };
+    err = e as { code?: string; message?: string };
   }
   if (!err) throw new Error(`expected SQLSTATE ${code}, but the write succeeded`);
   expect(err.code).toBe(code);
+  expect(err.message ?? "").toMatch(messageRe);
 }
 
 describe("RLS write/permission matrix", () => {
@@ -99,9 +110,10 @@ describe("RLS write/permission matrix", () => {
     });
   });
 
-  it("4. captain writes ANOTHER league's match -> DENY (42501)", async () => {
+  it("4. captain writes ANOTHER league's match -> DENY by RLS with-check (42501 + RLS message)", async () => {
     await asUser(fx.uKaHome, async () => {
-      await expectSqlState("42501", () =>
+      // distinguish RLS-with-check from a missing-grant 42501 via the message
+      await expectSqlState("42501", /row-level security/, () =>
         db.query(
           `insert into line_game (match_line_id, game_number, home_score, away_score)
            values ($1, 9, 11, 0)`,
@@ -121,9 +133,9 @@ describe("RLS write/permission matrix", () => {
     });
   });
 
-  it("6. commissioner writes ANOTHER league -> DENY (42501)", async () => {
+  it("6. commissioner writes ANOTHER league -> DENY by RLS with-check (42501 + RLS message)", async () => {
     await asUser(fx.uCommA, async () => {
-      await expectSqlState("42501", () =>
+      await expectSqlState("42501", /row-level security/, () =>
         db.query("insert into match (division_id, status) values ($1, 'scheduled')", [
           fx.divB,
         ]),
@@ -134,7 +146,7 @@ describe("RLS write/permission matrix", () => {
   it("7. FK-value trigger: foreign-league player into match_line -> RAISE (P0001)", async () => {
     await asUser(fx.uCommA, async () => {
       // RLS passes (commissioner of Ma's league); the trigger must still fire.
-      await expectSqlState("P0001", () =>
+      await expectSqlState("P0001", /player must belong to the match league/, () =>
         db.query(
           `insert into match_line (match_id, round_number, home_pair_index, away_pair_index, home_player1_id)
            values ($1, 1, 2, 2, $2)`,
@@ -146,7 +158,7 @@ describe("RLS write/permission matrix", () => {
 
   it("8. FK-value trigger: foreign-league member into roster_entry -> RAISE (P0001)", async () => {
     await asUser(fx.uCommA, async () => {
-      await expectSqlState("P0001", () =>
+      await expectSqlState("P0001", /member must belong to the team league/, () =>
         db.query(
           "insert into roster_entry (team_id, member_id) values ($1, $2)",
           [fx.teamAHome, fx.Pb],
@@ -155,9 +167,10 @@ describe("RLS write/permission matrix", () => {
     });
   });
 
-  it("9. anon (real anon role) cannot write -> DENY (42501)", async () => {
+  it("9. anon (real anon role) cannot write -> DENY at grant level (42501 + permission-denied message)", async () => {
     await asAnon(async () => {
-      await expectSqlState("42501", () =>
+      // anon has no write grant at all — denied before RLS, by privilege.
+      await expectSqlState("42501", /permission denied for table/, () =>
         db.query(
           `insert into line_game (match_line_id, game_number, home_score, away_score)
            values ($1, 9, 11, 0)`,
