@@ -17,6 +17,7 @@ export interface Fixtures {
   uKaHome: string;
   uKaAway: string;
   uPa: string;
+  uKbCap: string; // a league-B captain (for cross-league lineup denial)
   // entities
   divA: string;
   divB: string;
@@ -26,7 +27,19 @@ export interface Fixtures {
   mlMb: string;
   teamAHome: string;
   Pb: string; // league-B member, for FK-value triggers
+  playersA: string[]; // 6 league-A members, for lineup submission
 }
+
+const ATPL_STRUCTURE = {
+  rounds: 3,
+  lines_per_round: 3,
+  games_per_line: 2,
+  rotation: {
+    "1": { "1": 1, "2": 2, "3": 3 },
+    "2": { "1": 2, "2": 3, "3": 1 },
+    "3": { "1": 3, "2": 1, "3": 2 },
+  },
+};
 
 async function one(db: Client, sql: string, params: unknown[] = []): Promise<string> {
   const r = await db.query(sql, params);
@@ -85,6 +98,16 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
     "insert into season (league_id, name) values ($1, 'S') returning id",
     [leagueA],
   );
+  const ruleSetA = await one(
+    db,
+    `insert into rule_set (league_id, name, scoring_format_id, structure)
+     values ($1, 'ATPL', $2, $3::jsonb) returning id`,
+    [leagueA, sfA, JSON.stringify(ATPL_STRUCTURE)],
+  );
+  await db.query("update season set rule_set_id = $1 where id = $2", [
+    ruleSetA,
+    seasonA,
+  ]);
   const divA = await one(
     db,
     "insert into division (season_id, name, scoring_format_id) values ($1, 'D', $2) returning id",
@@ -112,6 +135,12 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
   const kaAway = await addMember(db, leagueA, uKaAway, "KaAway");
   const uPa = await newAuthUser(db, "pa@rlsharness.local");
   await addMember(db, leagueA, uPa, "Pa"); // plain rostered player, no role/captaincy
+
+  // 6 league-A members to assign in lineups
+  const playersA: string[] = [];
+  for (let i = 1; i <= 6; i++) {
+    playersA.push(await addMember(db, leagueA, null, `PlayerA${i}`));
+  }
 
   const teamAHome = await one(
     db,
@@ -162,10 +191,12 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
     "insert into division (season_id, name, scoring_format_id) values ($1, 'D', $2) returning id",
     [seasonB, sfB],
   );
+  const uKbCap = await newAuthUser(db, "kb-cap@rlsharness.local");
+  const kbCap = await addMember(db, leagueB, uKbCap, "KbCap");
   const teamB = await one(
     db,
-    "insert into team (division_id, name) values ($1, 'B') returning id",
-    [divB],
+    "insert into team (division_id, name, captain_member_id) values ($1, 'B', $2) returning id",
+    [divB, kbCap],
   );
   const Mb = await one(
     db,
@@ -185,6 +216,7 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
     uKaHome,
     uKaAway,
     uPa,
+    uKbCap,
     divA,
     divB,
     Ma,
@@ -193,5 +225,6 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
     mlMb,
     teamAHome,
     Pb,
+    playersA,
   };
 }

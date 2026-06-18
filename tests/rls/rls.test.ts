@@ -230,3 +230,92 @@ describe("scheduling: match write path", () => {
     });
   });
 });
+
+// Lineup (PR #4) writes match_line only through submit_lineup(). Captains have
+// no direct match_line write, so the RPC's side-ownership check IS the column
+// boundary. The full authz story for that write path lives here.
+describe("lineup: submit_lineup write path", () => {
+  const lineup = (match: string, side: string, pairs: string[]) =>
+    db.query("select submit_lineup($1, $2, $3)", [match, side, pairs]);
+
+  it("L1. home captain submits OWN side -> PASS (9 rows, home set, away null)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      await lineup(fx.Ma, "home", fx.playersA);
+      const rows = await db.query(
+        "select home_player1_id, away_player1_id from match_line where match_id = $1",
+        [fx.Ma],
+      );
+      expect(rows.rowCount).toBe(9);
+      expect(rows.rows.every((r) => r.home_player1_id !== null)).toBe(true);
+      expect(rows.rows.every((r) => r.away_player1_id === null)).toBe(true);
+    });
+  });
+
+  it("L2. away captain submits OWN side -> PASS (away set, home null)", async () => {
+    await asUser(fx.uKaAway, async () => {
+      await lineup(fx.Ma, "away", fx.playersA);
+      const rows = await db.query(
+        "select home_player1_id, away_player1_id from match_line where match_id = $1",
+        [fx.Ma],
+      );
+      expect(rows.rowCount).toBe(9);
+      expect(rows.rows.every((r) => r.away_player1_id !== null)).toBe(true);
+      expect(rows.rows.every((r) => r.home_player1_id === null)).toBe(true);
+    });
+  });
+
+  it("L3. home captain submits the OPPONENT's side -> DENY (P0001 + not authorized)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      await expectSqlState("P0001", /not authorized/, () =>
+        lineup(fx.Ma, "away", fx.playersA),
+      );
+    });
+  });
+
+  it("L4. plain member submits a lineup -> DENY (P0001 + not authorized)", async () => {
+    await asUser(fx.uPa, async () => {
+      await expectSqlState("P0001", /not authorized/, () =>
+        lineup(fx.Ma, "home", fx.playersA),
+      );
+    });
+  });
+
+  it("L5. another league's captain submits -> DENY (P0001 + not authorized)", async () => {
+    await asUser(fx.uKbCap, async () => {
+      await expectSqlState("P0001", /not authorized/, () =>
+        lineup(fx.Ma, "home", fx.playersA),
+      );
+    });
+  });
+
+  it("L6. captain bypasses RPC with a direct match_line INSERT -> DENY (42501 + RLS message)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      await expectSqlState("42501", /row-level security/, () =>
+        db.query(
+          `insert into match_line (match_id, round_number, home_pair_index, away_pair_index)
+           values ($1, 2, 2, 2)`,
+          [fx.Ma],
+        ),
+      );
+    });
+  });
+
+  it("L6b. captain bypasses RPC with a direct match_line UPDATE -> DENY (rowCount 0)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      const r = await db.query(
+        "update match_line set away_player1_id = $1 where match_id = $2",
+        [fx.playersA[0], fx.Ma],
+      );
+      expect(r.rowCount).toBe(0);
+    });
+  });
+
+  it("L7. submit OWN side with a foreign-league player -> RAISE (P0001 + trigger message)", async () => {
+    const pairsWithForeign = [...fx.playersA.slice(0, 5), fx.Pb];
+    await asUser(fx.uKaHome, async () => {
+      await expectSqlState("P0001", /player must belong to the match league/, () =>
+        lineup(fx.Ma, "home", pairsWithForeign),
+      );
+    });
+  });
+});
