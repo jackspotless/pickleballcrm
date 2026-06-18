@@ -2,9 +2,15 @@
  * RLS behavioral-harness fixtures: two leagues so tenant isolation is testable.
  *
  * League A: commissioner Cα; team A-home (captain Ka_home), team A-away
- * (captain Ka_away); match Ma with a match_line + line_game; plain member Pα
- * (rostered, NO write permission — isolates in-tenant authz from isolation).
- * League B: division/team/match Mb + match_line; member Pβ (for FK-value tests).
+ * (captain Ka_away); a third team A-other (captain Ka_other, on NO match — for
+ * the non-match-captain score denial); plain member Pα (rostered, NO write
+ * permission). Matches:
+ *   - Ma:      lineup/FK/read match — mlMa has NULL players (lineup tests fill it).
+ *   - Mscore:  a fully-submitted, SCORABLE match (mlScore both sides populated) +
+ *              line_game lgScore — the score-entry write path runs here.
+ *   - MaHalf:  a HALF-submitted match (mlMaHalf away still null) — for the
+ *              scorability boundary (real score denied; forfeit exempt).
+ * League B: division/team/match Mb + match_line; member Pβ (FK-value tests).
  *
  * auth.users rows are inserted as superuser and linked via member.auth_user_id,
  * so the harness can assume each identity by setting request.jwt.claims.sub.
@@ -16,14 +22,18 @@ export interface Fixtures {
   uCommA: string;
   uKaHome: string;
   uKaAway: string;
+  uKaOther: string; // league-A captain on no match (non-match-captain denial)
   uPa: string;
-  uKbCap: string; // a league-B captain (for cross-league lineup denial)
+  uKbCap: string; // a league-B captain (for cross-league lineup/score denial)
   // entities
   divA: string;
   divB: string;
   Ma: string;
   mlMa: string;
-  lgA: string;
+  Mscore: string;
+  mlScore: string;
+  lgScore: string;
+  mlMaHalf: string;
   mlMb: string;
   teamAHome: string;
   Pb: string; // league-B member, for FK-value triggers
@@ -133,10 +143,12 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
   const kaHome = await addMember(db, leagueA, uKaHome, "KaHome");
   const uKaAway = await newAuthUser(db, "ka-away@rlsharness.local");
   const kaAway = await addMember(db, leagueA, uKaAway, "KaAway");
+  const uKaOther = await newAuthUser(db, "ka-other@rlsharness.local");
+  const kaOther = await addMember(db, leagueA, uKaOther, "KaOther");
   const uPa = await newAuthUser(db, "pa@rlsharness.local");
   await addMember(db, leagueA, uPa, "Pa"); // plain rostered player, no role/captaincy
 
-  // 6 league-A members to assign in lineups
+  // 6 league-A members to assign in lineups / populate scorable match_lines
   const playersA: string[] = [];
   for (let i = 1; i <= 6; i++) {
     playersA.push(await addMember(db, leagueA, null, `PlayerA${i}`));
@@ -152,7 +164,15 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
     "insert into team (division_id, name, captain_member_id) values ($1, 'A-away', $2) returning id",
     [divA, kaAway],
   );
+  // A third team whose captain is on NEITHER Ma nor Mscore (non-match captain).
+  await one(
+    db,
+    "insert into team (division_id, name, captain_member_id) values ($1, 'A-other', $2) returning id",
+    [divA, kaOther],
+  );
 
+  // Ma — lineup/FK/read match. mlMa keeps NULL players so the lineup tests can
+  // prove submit_lineup writes only one side (Ma is intentionally NOT scorable).
   const Ma = await one(
     db,
     `insert into match (division_id, home_team_id, away_team_id, status)
@@ -165,10 +185,46 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
      values ($1, 1, 1, 1) returning id`,
     [Ma],
   );
-  const lgA = await one(
+
+  // Mscore — a fully-submitted, SCORABLE match (both lineups in). The score-entry
+  // write path (PASS / lock / status-flip / commissioner-correction) runs here.
+  const Mscore = await one(
     db,
-    "insert into line_game (match_line_id, game_number, home_score, away_score) values ($1, 1, 0, 0) returning id",
-    [mlMa],
+    `insert into match (division_id, home_team_id, away_team_id, status)
+     values ($1, $2, $3, 'scheduled') returning id`,
+    [divA, teamAHome, teamAAway],
+  );
+  const mlScore = await one(
+    db,
+    `insert into match_line
+       (match_id, round_number, home_pair_index, away_pair_index,
+        home_player1_id, home_player2_id, away_player1_id, away_player2_id)
+     values ($1, 1, 1, 1, $2, $3, $4, $5) returning id`,
+    [Mscore, playersA[0], playersA[1], playersA[2], playersA[3]],
+  );
+  // Unscored game (null/null) so loading fixtures does NOT trip the lock trigger
+  // (a real game can never end null/null; the lock fires only on a determined result).
+  const lgScore = await one(
+    db,
+    "insert into line_game (match_line_id, game_number, home_score, away_score) values ($1, 1, null, null) returning id",
+    [mlScore],
+  );
+
+  // MaHalf — HALF-submitted (away still null): not scorable. For the scorability
+  // boundary: a real score is denied, a forfeit is exempt. kaHome captains it.
+  const MaHalf = await one(
+    db,
+    `insert into match (division_id, home_team_id, away_team_id, status)
+     values ($1, $2, $3, 'scheduled') returning id`,
+    [divA, teamAHome, teamAAway],
+  );
+  const mlMaHalf = await one(
+    db,
+    `insert into match_line
+       (match_id, round_number, home_pair_index, away_pair_index,
+        home_player1_id, home_player2_id)
+     values ($1, 1, 1, 1, $2, $3) returning id`,
+    [MaHalf, playersA[0], playersA[1]],
   );
 
   // ---- League B ----
@@ -215,13 +271,17 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
     uCommA,
     uKaHome,
     uKaAway,
+    uKaOther,
     uPa,
     uKbCap,
     divA,
     divB,
     Ma,
     mlMa,
-    lgA,
+    Mscore,
+    mlScore,
+    lgScore,
+    mlMaHalf,
     mlMb,
     teamAHome,
     Pb,
