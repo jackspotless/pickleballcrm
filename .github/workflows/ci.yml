@@ -41,6 +41,9 @@ jobs:
           db_url=$(echo "$status" | grep '^DB_URL=' | cut -d= -f2- | tr -d '"')
           echo "DATABASE_URL=$db_url" >> "$GITHUB_ENV"
 
+      - name: RLS behavioral harness
+        run: npm run test:rls
+
       - name: Seed
         run: npm run seed
 
