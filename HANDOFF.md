@@ -1,11 +1,13 @@
 # Desert ATPL Platform — Handoff (Phase 2, mid-Chunk B)
 
-Reset reference for starting **PR #6 (flag review)** in a clean window. Everything
-below is current as of `main` containing PR #5 (score entry).
+Reset reference with **Chunk B complete** — all Phase 2 operational screens
+(scheduling, lineup, score entry, flag review) are merged. Everything below is
+current as of `main` containing PR #6 (flag review). Next work is the post-pilot
+deferred track (see What's left).
 
 ## Trunk state
 
-- **`main` HEAD when this doc was written:** PR #5 (Chunk B: score entry) merged
+- **`main` HEAD when this doc was written:** PR #6 (Chunk B: flag review) merged
   — this handoff sits on top.
 - **Merged and live on `main`:**
   - Phase 1 — core schema, all enums/FKs, RLS on every table, `current_member()`
@@ -29,6 +31,9 @@ below is current as of `main` containing PR #5 (score entry).
     directly (either-captain via `can_write_match`). Owns the scorability +
     lineup-lock boundaries (below) + whole-match `forfeit_match()` RPC; read-only
     engine preview reuses `scoreMatch`.
+  - Flag review (PR #6) — `src/app/flags` (commissioner). Acts on flagged
+    matches: `resolve_flag()` + `correct_lineup()` RPCs, finalize lifecycle.
+    Owns the result-correction lifecycle (below).
 
 - **Migrations (apply in this order):**
   1. `supabase/migrations/20260617000000_phase1_core.sql`
@@ -36,6 +41,7 @@ below is current as of `main` containing PR #5 (score entry).
   3. `supabase/migrations/20260618000000_grants.sql`
   4. `supabase/migrations/20260618120000_lineup.sql`
   5. `supabase/migrations/20260618180000_score_entry.sql`
+  6. `supabase/migrations/20260619000000_flag_review.sql`
 
 - **CI pipeline** (`.github/workflows/ci.yml`, Node 22): typecheck → unit tests →
   `supabase start` → `db reset` → **RLS harness** (`test:rls`) → seed → verify
@@ -93,6 +99,33 @@ below is current as of `main` containing PR #5 (score entry).
   flagged-match correction can re-pair and re-score. Proven by harness case SC9
   (commissioner `match_line` write after lock → PASS).
 
+## Result-correction lifecycle resolved in PR #6 (flag review) — operate under these
+
+- **Auto-finalize on completion.** The `line_game_after_write` AFTER-trigger flips
+  `in_progress → final` the moment the scoresheet is complete — all expected games
+  determined, `is_scoring_complete(match)` = (# `match_line`) × `games_per_line`,
+  forfeits counting as determined. **No manual finalize, no fourth status.** The
+  completing write itself passes (gate-on-`status`, transition-in-trigger — the
+  same split as the first-score lock); the *next* captain write is locked.
+- **Captain final-lock.** `line_game_write` WITH CHECK uses `can_score_line_game`:
+  a captain write to a `final` match → `42501` + row-level security; the
+  **commissioner is exempt** (`is_commissioner`), so in-place correction stays
+  open (A1). `using` is unchanged → PR #5 deny mechanisms intact.
+- **Manual finalize** = direct `match` update (`match_write` = commissioner) for
+  the incomplete/abandoned case. **Re-open is deferred** (post-pilot) — the
+  commissioner corrects in place rather than handing scoring back to captains.
+- **Flag resolution (B2):** `resolve_flag(match, note)` (commissioner-only) sets
+  `is_flagged=false` and stamps `flag_resolution` / `flag_resolved_at` /
+  `flag_resolved_by` (the `_by` FK is `ON DELETE SET NULL`), keeping `flag_comment`
+  as the original dispute. **Decoupled from correction** — resolve without editing
+  a score, correct without resolving. **Single-record limitation (known):** a
+  re-flag via `flag_match()` does NOT clear the prior resolution stamps; the
+  resolution fields are authoritative **only when `is_flagged = false`**. A
+  `match_flag` history table is the post-pilot upgrade if threaded history is needed.
+- **Pairing correction:** `correct_lineup(match, side, pairs)` — commissioner-only,
+  **lock-exempt** (no `status` guard, unlike `submit_lineup`). Dropping the lock
+  guard does NOT drop the member-league FK-value guard (harness FR8).
+
 ## Testing boundary (do not let it blur)
 
 The harness proves **authorization** on write paths. It does **not** prove forms
@@ -101,15 +134,15 @@ must never come to mean "screen works."
 
 ## What's left
 
-- **PR #6 — flag review** (next): commissioner sees flagged matches + comments
-  and acts (correct result, clear flag); captains flag via `flag_match()`
-  (already exists, incl. opposing captain). Corrections run through the
-  commissioner direct-`match_line` escape hatch (above), which stays open under
-  the lineup-lock — re-pairing a locked match is a commissioner-only action.
-- **Post-pilot deferred:** payments/registration live capture (separate gated
-  track); ratings/TSR (see the ratings roadmap doc); native apps; chat/message
-  center; round-grained weather resumption (V); other rule sets + tournament
-  bracket engine.
+Chunk B is complete — all Phase 2 operational screens are merged. Nothing
+operational is queued; remaining work is the post-pilot deferred track.
+
+- **Post-pilot deferred:** match-result **re-open** (final → in_progress, handing
+  scoring back to captains) + `match_flag` history table (threaded/repeat flags);
+  payments/registration live capture (separate gated track); ratings/TSR (see the
+  ratings roadmap doc); native apps; chat/message center; round-grained weather
+  resumption (V); other rule sets + tournament bracket engine; standings/results
+  pages that consume `final`.
 
 ## Key files
 
@@ -120,13 +153,21 @@ must never come to mean "screen works."
   `division.scoring_format_id`, the same path CI anchor-verify uses); SQL
   (`is_match_scorable`, `line_game_after_write`, `forfeit_match`, the
   `submit_lineup` lock guard) in `20260618180000_score_entry.sql`.
+- Flag review: `src/app/flags/{page,actions}.tsx`; SQL (`is_scoring_complete`,
+  the `line_game_after_write` completion rung, `can_score_line_game`,
+  `resolve_flag`, `correct_lineup`, the `match` resolution columns) in
+  `20260619000000_flag_review.sql`.
 - Harness: `tests/rls/{fixtures,rls.test.ts}`, `vitest.rls.config.ts`,
   `npm run test:rls`. Fixtures: two leagues (A/B), commissioner + both captains
   + a non-match captain + plain member + 6 players in A, a captain + member in B;
   identities assumed via `request.jwt.claims.sub` in rolled-back transactions.
   Score-entry cases run on a dedicated scorable match `Mscore` (both lineups in)
-  + half-submitted `MaHalf`; `Ma` stays the lineup match (untouched, so no
-  existing case's deny mechanism drifts).
+  + half-submitted `MaHalf`; `Ma` stays the lineup match (untouched). Flag-review
+  cases add `Mflag` / `Mflag2` (resolved) and complete `Mscore` in-transaction to
+  reach `final` — no persisted `final` match (it would collide with
+  verify-anchor's `where status='final'`). **Standing step:** reproduce the full
+  CI sequence (reset → harness → seed → verify) locally before pushing each PR —
+  `loadFixtures` commits, so a persisted fixture can pollute the later seed/verify.
 - Seed/verify: `scripts/{seed,verify-anchor}.ts` (direct `pg`, superuser).
 - Anchor: 04/07/2026 — Other Desert Cities 21 @ Benchies United 24, rounds won
   1–1; re-derived from Postgres in CI.

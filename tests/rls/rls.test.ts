@@ -451,3 +451,203 @@ describe("score entry: line_game write path", () => {
     });
   });
 });
+
+// Flag review (PR #6). The commissioner acts on flagged matches: resolve_flag()
+// (decoupled from correction), correct_lineup() (commissioner-only, lock-exempt),
+// the auto-finalize completion lock, and the captain final-lock on line_game.
+// Full authz + lifecycle story for each new write path lives here.
+describe("flag review: resolve / correction / finalize write paths", () => {
+  it("FR1. commissioner resolves a flagged match with NO score edit -> PASS (decoupled)", async () => {
+    await asUser(fx.uCommA, async () => {
+      const before = await db.query(
+        "select count(*) from line_game lg join match_line ml on ml.id = lg.match_line_id where ml.match_id = $1",
+        [fx.Mflag],
+      );
+      await db.query("select resolve_flag($1, $2)", [fx.Mflag, "no rule broken"]);
+      const m = await db.query(
+        "select is_flagged, flag_resolution, flag_resolved_by, flag_comment from match where id = $1",
+        [fx.Mflag],
+      );
+      expect(m.rows[0].is_flagged).toBe(false);
+      expect(m.rows[0].flag_resolution).toBe("no rule broken");
+      expect(m.rows[0].flag_resolved_by).not.toBeNull();
+      expect(m.rows[0].flag_comment).toBe("disputed line 4 score"); // dispute kept
+      // No score was created/changed by resolving.
+      const after = await db.query(
+        "select count(*) from line_game lg join match_line ml on ml.id = lg.match_line_id where ml.match_id = $1",
+        [fx.Mflag],
+      );
+      expect(after.rows[0].count).toBe(before.rows[0].count);
+    });
+  });
+
+  it("FR2. captain resolves a flag -> DENY (P0001 + not authorized)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      await expectSqlState("P0001", /not authorized/, () =>
+        db.query("select resolve_flag($1, $2)", [fx.Mflag, "x"]),
+      );
+    });
+  });
+
+  it("FR3. another league's commissioner resolves -> DENY (P0001 + not authorized)", async () => {
+    // uCommA is league A's commissioner; Mb is in league B.
+    await asUser(fx.uCommA, async () => {
+      await expectSqlState("P0001", /not authorized/, () =>
+        db.query("select resolve_flag($1, $2)", [fx.Mb, "x"]),
+      );
+    });
+  });
+
+  it("FR4. re-flag after resolve: captain flag_match on a RESOLVED match -> PASS; resolution stamps go stale", async () => {
+    await asUser(fx.uKaHome, async () => {
+      await db.query("select flag_match($1, $2)", [fx.Mflag2, "new dispute"]);
+      const m = await db.query(
+        "select is_flagged, flag_comment, flag_resolution from match where id = $1",
+        [fx.Mflag2],
+      );
+      expect(m.rows[0].is_flagged).toBe(true);
+      expect(m.rows[0].flag_comment).toBe("new dispute");
+      // B2 single-record property: flag_match does NOT clear the prior resolution;
+      // resolution fields are authoritative only while is_flagged = false.
+      expect(m.rows[0].flag_resolution).toBe("corrected and cleared");
+    });
+  });
+
+  it("FR5. correct_lineup: commissioner corrects a pairing AFTER lock -> PASS (lock-exempt)", async () => {
+    await asUser(fx.uCommA, async () => {
+      // Lock Mscore (determined score -> in_progress); correct_lineup has no lock guard.
+      await db.query(
+        "update line_game set home_score = 11, away_score = 9 where id = $1",
+        [fx.lgScore],
+      );
+      await db.query("select correct_lineup($1, $2, $3)", [
+        fx.Mscore,
+        "home",
+        fx.playersA,
+      ]);
+      const rows = await db.query(
+        "select home_player1_id from match_line where match_id = $1",
+        [fx.Mscore],
+      );
+      expect(rows.rows.every((r) => r.home_player1_id !== null)).toBe(true);
+    });
+  });
+
+  it("FR6. correct_lineup by a captain -> DENY (P0001 + not authorized)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      await expectSqlState("P0001", /not authorized/, () =>
+        db.query("select correct_lineup($1, $2, $3)", [fx.Mscore, "home", fx.playersA]),
+      );
+    });
+  });
+
+  it("FR7. correct_lineup by another league's commissioner -> DENY (P0001 + not authorized)", async () => {
+    await asUser(fx.uCommA, async () => {
+      await expectSqlState("P0001", /not authorized/, () =>
+        db.query("select correct_lineup($1, $2, $3)", [fx.Mb, "home", fx.playersA]),
+      );
+    });
+  });
+
+  it("FR8. correct_lineup with a FOREIGN-league player -> RAISE (P0001 + trigger message)", async () => {
+    // Dropping the lock guard did NOT drop the member-league (FK-value) guard.
+    const pairsWithForeign = [...fx.playersA.slice(0, 5), fx.Pb];
+    await asUser(fx.uCommA, async () => {
+      await expectSqlState("P0001", /player must belong to the match league/, () =>
+        db.query("select correct_lineup($1, $2, $3)", [fx.Mscore, "home", pairsWithForeign]),
+      );
+    });
+  });
+
+  it("FR9. SC9 re-assert: commissioner direct match_line write AFTER lock -> PASS (escape hatch)", async () => {
+    await asUser(fx.uCommA, async () => {
+      await db.query(
+        "update line_game set home_score = 11, away_score = 9 where id = $1",
+        [fx.lgScore],
+      );
+      const r = await db.query(
+        "update match_line set home_player1_id = $1 where match_id = $2",
+        [fx.playersA[0], fx.Mscore],
+      );
+      expect(r.rowCount).toBe(1);
+    });
+  });
+
+  it("FR10. auto-finalize: completing the scoresheet flips in_progress -> final (direct assertion)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      // Mscore has 1 line x 2 games. Determine BOTH -> scoring complete -> final.
+      await db.query(
+        "update line_game set home_score = 11, away_score = 9 where id = $1",
+        [fx.lgScore],
+      );
+      const mid = await db.query("select status from match where id = $1", [fx.Mscore]);
+      expect(mid.rows[0].status).toBe("in_progress"); // 1 of 2 games: not complete
+      await db.query(
+        "update line_game set home_score = 7, away_score = 11 where id = $1",
+        [fx.lgScore2],
+      );
+      const done = await db.query("select status from match where id = $1", [fx.Mscore]);
+      expect(done.rows[0].status).toBe("final"); // 2 of 2: auto-finalized
+    });
+  });
+
+  it("FR11. captain score-lock: once the match is final, a further captain write -> DENY (42501 + RLS)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      // The captain can ENTER the completing games (status is in_progress at each
+      // WITH CHECK); the 2nd determined game auto-finalizes the match...
+      await db.query("update line_game set home_score = 11, away_score = 9 where id = $1", [fx.lgScore]);
+      await db.query("update line_game set home_score = 7, away_score = 11 where id = $1", [fx.lgScore2]);
+      const st = await db.query("select status from match where id = $1", [fx.Mscore]);
+      expect(st.rows[0].status).toBe("final");
+      // ...and a further captain write to the now-final match is denied.
+      await expectSqlState("42501", /row-level security/, () =>
+        db.query("update line_game set home_score = 3 where id = $1", [fx.lgScore]),
+      );
+    });
+  });
+
+  it("FR12. commissioner corrects a FINAL match's score -> PASS (exempt; the escape hatch at final)", async () => {
+    await asUser(fx.uCommA, async () => {
+      // Complete Mscore -> final (commissioner may score too), then correct in place.
+      await db.query("update line_game set home_score = 11, away_score = 9 where id = $1", [fx.lgScore]);
+      await db.query("update line_game set home_score = 7, away_score = 11 where id = $1", [fx.lgScore2]);
+      const st = await db.query("select status from match where id = $1", [fx.Mscore]);
+      expect(st.rows[0].status).toBe("final");
+      const r = await db.query(
+        "update line_game set home_score = 9, away_score = 11 where id = $1",
+        [fx.lgScore],
+      );
+      expect(r.rowCount).toBe(1);
+    });
+  });
+
+  it("FR13a. commissioner finalizes a match (status update) -> PASS", async () => {
+    await asUser(fx.uCommA, async () => {
+      const r = await db.query(
+        "update match set status = 'final' where id = $1",
+        [fx.Mscore],
+      );
+      expect(r.rowCount).toBe(1);
+    });
+  });
+
+  it("FR13b. captain finalizes a match -> DENY (rowCount 0; match_write using = is_commissioner)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      const r = await db.query(
+        "update match set status = 'final' where id = $1",
+        [fx.Mscore],
+      );
+      expect(r.rowCount).toBe(0);
+    });
+  });
+
+  it("FR13c. another league's commissioner finalizes -> DENY (rowCount 0)", async () => {
+    await asUser(fx.uCommA, async () => {
+      const r = await db.query(
+        "update match set status = 'final' where id = $1",
+        [fx.Mb],
+      );
+      expect(r.rowCount).toBe(0);
+    });
+  });
+});

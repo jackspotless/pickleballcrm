@@ -33,8 +33,12 @@ export interface Fixtures {
   Mscore: string;
   mlScore: string;
   lgScore: string;
+  lgScore2: string; // 2nd game on mlScore — completes the scoresheet (auto-finalize)
   mlMaHalf: string;
+  Mb: string; // league-B match (cross-league resolve_flag denial)
   mlMb: string;
+  Mflag: string; // league-A flagged match (resolve_flag)
+  Mflag2: string; // league-A already-resolved match (re-flag after resolve)
   teamAHome: string;
   Pb: string; // league-B member, for FK-value triggers
   playersA: string[]; // 6 league-A members, for lineup submission
@@ -209,6 +213,14 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
     "insert into line_game (match_line_id, game_number, home_score, away_score) values ($1, 1, null, null) returning id",
     [mlScore],
   );
+  // Mscore has games_per_line = 2, so it is complete only when BOTH games are
+  // determined — the 2nd game here lets a test complete the sheet and prove the
+  // auto-finalize transition. (One determined game leaves it short -> in_progress.)
+  const lgScore2 = await one(
+    db,
+    "insert into line_game (match_line_id, game_number, home_score, away_score) values ($1, 2, null, null) returning id",
+    [mlScore],
+  );
 
   // MaHalf — HALF-submitted (away still null): not scorable. For the scorability
   // boundary: a real score is denied, a forfeit is exempt. kaHome captains it.
@@ -225,6 +237,26 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
         home_player1_id, home_player2_id)
      values ($1, 1, 1, 1, $2, $3) returning id`,
     [MaHalf, playersA[0], playersA[1]],
+  );
+
+  // Mflag — a flagged league-A match (kaHome captains it) for resolve_flag.
+  const Mflag = await one(
+    db,
+    `insert into match (division_id, home_team_id, away_team_id, status, is_flagged, flag_comment)
+     values ($1, $2, $3, 'in_progress', true, 'disputed line 4 score') returning id`,
+    [divA, teamAHome, teamAAway],
+  );
+
+  // Mflag2 — an ALREADY-RESOLVED league-A match (kaHome captains it). Used to
+  // prove a re-flag leaves the prior resolution stamps stale (B2 single record).
+  const Mflag2 = await one(
+    db,
+    `insert into match
+       (division_id, home_team_id, away_team_id, status,
+        is_flagged, flag_comment, flag_resolution, flag_resolved_at, flag_resolved_by)
+     values ($1, $2, $3, 'in_progress', false, 'old dispute', 'corrected and cleared', now(), $4)
+     returning id`,
+    [divA, teamAHome, teamAAway, commMemberA],
   );
 
   // ---- League B ----
@@ -281,8 +313,12 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
     Mscore,
     mlScore,
     lgScore,
+    lgScore2,
     mlMaHalf,
+    Mb,
     mlMb,
+    Mflag,
+    Mflag2,
     teamAHome,
     Pb,
     playersA,
