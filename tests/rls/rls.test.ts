@@ -83,7 +83,7 @@ describe("RLS write/permission matrix", () => {
     await asUser(fx.uKaHome, async () => {
       const r = await db.query(
         "update line_game set home_score = 11 where id = $1",
-        [fx.lgA],
+        [fx.lgScore],
       );
       expect(r.rowCount).toBe(1);
     });
@@ -93,7 +93,7 @@ describe("RLS write/permission matrix", () => {
     await asUser(fx.uKaAway, async () => {
       const r = await db.query(
         "update line_game set away_score = 11 where id = $1",
-        [fx.lgA],
+        [fx.lgScore],
       );
       expect(r.rowCount).toBe(1);
     });
@@ -103,7 +103,7 @@ describe("RLS write/permission matrix", () => {
     await asUser(fx.uPa, async () => {
       const r = await db.query(
         "update line_game set home_score = 7 where id = $1",
-        [fx.lgA],
+        [fx.lgScore],
       );
       // RLS `using` (can_write_match) hides the row from this writer — not a throw.
       expect(r.rowCount).toBe(0);
@@ -316,6 +316,138 @@ describe("lineup: submit_lineup write path", () => {
       await expectSqlState("P0001", /player must belong to the match league/, () =>
         lineup(fx.Ma, "home", pairsWithForeign),
       );
+    });
+  });
+});
+
+// Score entry (PR #5) writes line_game DIRECTLY (either-captain via the
+// can_write_match RLS policy — scores are shared, unlike lineup's per-side
+// ownership). Two DB-enforced boundaries layer on top, in an AFTER trigger so
+// RLS authorization is always decided first: scorability (both lineups required)
+// and lineup-lock (first determined score moves scheduled -> in_progress, which
+// closes submit_lineup). The full authz + boundary story lives here in full.
+describe("score entry: line_game write path", () => {
+  it("SC1. own-match (home) captain writes a score -> PASS", async () => {
+    await asUser(fx.uKaHome, async () => {
+      const r = await db.query(
+        "update line_game set home_score = 11 where id = $1",
+        [fx.lgScore],
+      );
+      expect(r.rowCount).toBe(1);
+    });
+  });
+
+  it("SC2. OPPOSING captain writes a score -> PASS (either-captain)", async () => {
+    await asUser(fx.uKaAway, async () => {
+      const r = await db.query(
+        "update line_game set away_score = 11 where id = $1",
+        [fx.lgScore],
+      );
+      expect(r.rowCount).toBe(1);
+    });
+  });
+
+  it("SC3. non-match captain (same league, on no match) -> DENY by RLS with-check (42501 + RLS message)", async () => {
+    await asUser(fx.uKaOther, async () => {
+      await expectSqlState("42501", /row-level security/, () =>
+        db.query(
+          `insert into line_game (match_line_id, game_number, home_score, away_score)
+           values ($1, 2, 11, 0)`,
+          [fx.mlScore],
+        ),
+      );
+    });
+  });
+
+  it("SC4. another league's captain writes scores -> DENY by RLS with-check (42501 + RLS message)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      await expectSqlState("42501", /row-level security/, () =>
+        db.query(
+          `insert into line_game (match_line_id, game_number, home_score, away_score)
+           values ($1, 9, 11, 0)`,
+          [fx.mlMb],
+        ),
+      );
+    });
+  });
+
+  it("SC5. scorability: real score on a HALF-submitted match -> DENY (P0001 + not scorable)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      // RLS passes (kaHome captains the half-submitted match's home team); the
+      // AFTER trigger then rejects the real score because the away lineup is null.
+      await expectSqlState("P0001", /not scorable/, () =>
+        db.query(
+          `insert into line_game (match_line_id, game_number, home_score, away_score)
+           values ($1, 1, 11, 9)`,
+          [fx.mlMaHalf],
+        ),
+      );
+    });
+  });
+
+  it("SC6. forfeit is EXEMPT from scorability: 11-0 forfeit on the half-submitted match -> PASS", async () => {
+    await asUser(fx.uKaHome, async () => {
+      const r = await db.query(
+        `insert into line_game (match_line_id, game_number, home_score, away_score, is_forfeit)
+         values ($1, 1, 11, 0, true)`,
+        [fx.mlMaHalf],
+      );
+      expect(r.rowCount).toBe(1);
+    });
+  });
+
+  it("SC7. lineup-lock: after a determined score, submit_lineup -> DENY (P0001 + lineup locked)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      // A determined result flips Mscore scheduled -> in_progress (the lock).
+      await db.query(
+        "update line_game set home_score = 11, away_score = 9 where id = $1",
+        [fx.lgScore],
+      );
+      // The captain lineup path is now closed.
+      await expectSqlState("P0001", /lineup locked/, () =>
+        db.query("select submit_lineup($1, $2, $3)", [
+          fx.Mscore,
+          "home",
+          fx.playersA,
+        ]),
+      );
+    });
+  });
+
+  it("SC8. status flip: a determined write moves scheduled -> in_progress (direct assertion)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      const before = await db.query("select status from match where id = $1", [
+        fx.Mscore,
+      ]);
+      expect(before.rows[0].status).toBe("scheduled");
+      await db.query(
+        "update line_game set home_score = 11, away_score = 9 where id = $1",
+        [fx.lgScore],
+      );
+      const after = await db.query("select status from match where id = $1", [
+        fx.Mscore,
+      ]);
+      expect(after.rows[0].status).toBe("in_progress");
+    });
+  });
+
+  it("SC9. commissioner correction: direct match_line write AFTER lock -> PASS (the escape hatch)", async () => {
+    await asUser(fx.uCommA, async () => {
+      // Lock the match by entering a determined score (commissioner may score too).
+      await db.query(
+        "update line_game set home_score = 11, away_score = 9 where id = $1",
+        [fx.lgScore],
+      );
+      const status = await db.query("select status from match where id = $1", [
+        fx.Mscore,
+      ]);
+      expect(status.rows[0].status).toBe("in_progress");
+      // Commissioner keeps DIRECT match_line write for corrections even when locked.
+      const r = await db.query(
+        "update match_line set home_player1_id = $1 where match_id = $2",
+        [fx.playersA[0], fx.Mscore],
+      );
+      expect(r.rowCount).toBe(1);
     });
   });
 });

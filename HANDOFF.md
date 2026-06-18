@@ -1,12 +1,12 @@
 # Desert ATPL Platform — Handoff (Phase 2, mid-Chunk B)
 
-Reset reference for starting **PR #5 (score entry)** in a clean window. Everything
-below is current as of `main` containing PR #4 (lineup).
+Reset reference for starting **PR #6 (flag review)** in a clean window. Everything
+below is current as of `main` containing PR #5 (score entry).
 
 ## Trunk state
 
-- **`main` HEAD when this doc was written:** `11c5433` (Chunk B PR4: lineup) —
-  this handoff commit sits directly on top.
+- **`main` HEAD when this doc was written:** PR #5 (Chunk B: score entry) merged
+  — this handoff sits on top.
 - **Merged and live on `main`:**
   - Phase 1 — core schema, all enums/FKs, RLS on every table, `current_member()`
     + `auth_league_ids()`, public view-layer SELECT, `public_member` /
@@ -25,12 +25,17 @@ below is current as of `main` containing PR #4 (lineup).
     harness caught; app was `permission denied` for all non-superuser requests).
   - Scheduling (PR #3) — `src/app/schedule` (commissioner creates matches).
   - Lineup (PR #4) — `src/app/lineup` + `submit_lineup` RPC.
+  - Score entry (PR #5) — `src/app/score` (mobile-first); writes `line_game`
+    directly (either-captain via `can_write_match`). Owns the scorability +
+    lineup-lock boundaries (below) + whole-match `forfeit_match()` RPC; read-only
+    engine preview reuses `scoreMatch`.
 
 - **Migrations (apply in this order):**
   1. `supabase/migrations/20260617000000_phase1_core.sql`
   2. `supabase/migrations/20260617120000_phase2_operations.sql`
   3. `supabase/migrations/20260618000000_grants.sql`
   4. `supabase/migrations/20260618120000_lineup.sql`
+  5. `supabase/migrations/20260618180000_score_entry.sql`
 
 - **CI pipeline** (`.github/workflows/ci.yml`, Node 22): typecheck → unit tests →
   `supabase start` → `db reset` → **RLS harness** (`test:rls`) → seed → verify
@@ -66,16 +71,27 @@ below is current as of `main` containing PR #4 (lineup).
 7. **`security definer` functions:** pinned `search_path = public, pg_temp`,
    auth check first, reuse the FK-chain resolvers (`match_league_id`, etc.).
 
-## Open boundaries PR #5 (score entry) must own
+## Boundaries resolved in PR #5 (score entry) — operate under these
 
-- **Scorable = all 8 player columns non-null across the 9 `match_line` rows.**
-  A half-submitted match (one side's lineup still null) is **not** scorable.
-- **Lineup-lock.** Once scoring starts / the match locks, lineup edits must
-  close — otherwise a pairing can be altered under an already-scored match and
-  corrupt score entry's assumptions. (Currently `submit_lineup` has no lock
-  check; deferred here on purpose.) Decide the lock representation (e.g.
-  `match.status` transition `scheduled→in_progress/final`, or a guard in
-  `submit_lineup` + score writes).
+- **(b) Scorability = `is_match_scorable(match)`** (security definer): scorable
+  iff **both lineups are fully submitted** — all 8 player columns non-null across
+  the `match_line` rows (and ≥1 row). A half-submitted match is not scorable.
+  Enforced by an **AFTER** trigger on `line_game` (`line_game_after_write`) so
+  RLS authorization is decided FIRST — a cross-league / non-match write is
+  rejected by RLS (42501 + row-level security) before the trigger runs (verified
+  on hosted PG: BEFORE-row → WITH CHECK → AFTER-row). **Forfeits are exempt** —
+  the mechanism for an absent/short side (incl. a whole-match no-show).
+- **(a) Lineup-lock = `match.status`, automatic first-score flip.** The first
+  *determined* result (both game scores set, or a forfeit) moves the match
+  `scheduled → in_progress` via the same AFTER trigger; that closes the captain
+  lineup path — `submit_lineup` raises `lineup locked: scoring has started` once
+  status ≠ `scheduled`. The lock is tied exactly to "scoring has started," the
+  window in which altering a pairing would corrupt entered scores.
+- **(c) Commissioner correction escape hatch — PR #6 depends on this.** The lock
+  closes only the *captain* path. Commissioner keeps **direct `match_line` write**
+  (`match_line_write` = `is_commissioner`) even when `in_progress`, so a
+  flagged-match correction can re-pair and re-score. Proven by harness case SC9
+  (commissioner `match_line` write after lock → PASS).
 
 ## Testing boundary (do not let it blur)
 
@@ -85,17 +101,11 @@ must never come to mean "screen works."
 
 ## What's left
 
-- **PR #5 — score entry** (next): mobile-first; the named deal-killer. Writes
-  `line_game` (gated by `can_write_match`). Presents the match as 3 rounds × 3
-  lines × 2 games carrying each pair through rounds. **Forfeit 11–0** affordance
-  (sets `line_game.is_forfeit`; engine already scores 11–0 as winner 2 / loser
-  0 / no consolation). Read-only **engine preview** (`scoreMatch`) of running
-  totals. Owns the two boundaries above. Harness adds the `line_game` write path:
-  own-match captain scores → PASS (either captain), non-match/cross-league →
-  DENY (message-matched), plus a scorability/lock assertion.
-- **PR #6 — flag review:** commissioner sees flagged matches + comments and acts
-  (correct result, clear flag); captains flag via `flag_match()` (already exists,
-  incl. opposing captain).
+- **PR #6 — flag review** (next): commissioner sees flagged matches + comments
+  and acts (correct result, clear flag); captains flag via `flag_match()`
+  (already exists, incl. opposing captain). Corrections run through the
+  commissioner direct-`match_line` escape hatch (above), which stays open under
+  the lineup-lock — re-pairing a locked match is a commissioner-only action.
 - **Post-pilot deferred:** payments/registration live capture (separate gated
   track); ratings/TSR (see the ratings roadmap doc); native apps; chat/message
   center; round-grained weather resumption (V); other rule sets + tournament
@@ -105,10 +115,18 @@ must never come to mean "screen works."
 
 - Engine: `src/lib/scoring/{engine,types,atpl-config}.ts`; rotation:
   `src/lib/match/rotation.ts`.
+- Score entry: `src/app/score/{page,actions}.tsx`; read-only view model
+  `src/lib/match/score-grid.ts` (config resolved through
+  `division.scoring_format_id`, the same path CI anchor-verify uses); SQL
+  (`is_match_scorable`, `line_game_after_write`, `forfeit_match`, the
+  `submit_lineup` lock guard) in `20260618180000_score_entry.sql`.
 - Harness: `tests/rls/{fixtures,rls.test.ts}`, `vitest.rls.config.ts`,
   `npm run test:rls`. Fixtures: two leagues (A/B), commissioner + both captains
-  + plain member + 6 players in A, a captain + member in B; identities assumed
-  via `request.jwt.claims.sub` in rolled-back transactions.
+  + a non-match captain + plain member + 6 players in A, a captain + member in B;
+  identities assumed via `request.jwt.claims.sub` in rolled-back transactions.
+  Score-entry cases run on a dedicated scorable match `Mscore` (both lineups in)
+  + half-submitted `MaHalf`; `Ma` stays the lineup match (untouched, so no
+  existing case's deny mechanism drifts).
 - Seed/verify: `scripts/{seed,verify-anchor}.ts` (direct `pg`, superuser).
 - Anchor: 04/07/2026 — Other Desert Cities 21 @ Benchies United 24, rounds won
   1–1; re-derived from Postgres in CI.
