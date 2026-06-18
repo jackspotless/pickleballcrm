@@ -194,3 +194,39 @@ describe("RLS write/permission matrix", () => {
     });
   });
 });
+
+// Scheduling screen (PR #3) writes `match` directly. The complete authz story
+// for that write path lives here in full — intentionally duplicated rather than
+// referencing the general cross-league case, so a refactor elsewhere can't
+// silently strip coverage this file appears to have.
+describe("scheduling: match write path", () => {
+  it("S1. commissioner creates a match in their OWN league -> PASS", async () => {
+    await asUser(fx.uCommA, async () => {
+      const r = await db.query(
+        "insert into match (division_id, status) values ($1, 'scheduled')",
+        [fx.divA],
+      );
+      expect(r.rowCount).toBe(1);
+    });
+  });
+
+  it("S2. captain creates a match -> DENY by RLS with-check (42501 + RLS message)", async () => {
+    await asUser(fx.uKaHome, async () => {
+      await expectSqlState("42501", /row-level security/, () =>
+        db.query("insert into match (division_id, status) values ($1, 'scheduled')", [
+          fx.divA,
+        ]),
+      );
+    });
+  });
+
+  it("S3. commissioner creates a match in ANOTHER league -> DENY (42501 + RLS message)", async () => {
+    await asUser(fx.uCommA, async () => {
+      await expectSqlState("42501", /row-level security/, () =>
+        db.query("insert into match (division_id, status) values ($1, 'scheduled')", [
+          fx.divB,
+        ]),
+      );
+    });
+  });
+});

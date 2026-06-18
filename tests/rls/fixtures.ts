@@ -18,6 +18,7 @@ export interface Fixtures {
   uKaAway: string;
   uPa: string;
   // entities
+  divA: string;
   divB: string;
   Ma: string;
   mlMa: string;
@@ -184,6 +185,7 @@ export async function loadFixtures(db: Client): Promise<Fixtures> {
     uKaHome,
     uKaAway,
     uPa,
+    divA,
     divB,
     Ma,
     mlMa,
